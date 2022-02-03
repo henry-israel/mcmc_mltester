@@ -1,113 +1,124 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Feb  2 10:33:48 2022
-
-@author: henryisrael
-"""
 import numpy as np
-import random
-class fakeData:
-    #Makes random gaussian for MCMC purposes    
-    def __init__(self, _spacedim,_nfakedata=1000,verbose=False): #number of steps
-        if not isinstance(verbose,bool):
-            raise TypeError("Verbosity must be of type bool")
-            
-        self.verbose=verbose
-        self.spacedim=self.getDim(_spacedim) #size of space
-        self.mean=np.random.rand(self.spacedim)
-        self.nfakedata=_nfakedata
-        #generate cov matrix at init
-        partial_cov=np.random.rand(self.spacedim,self.spacedim)
-    
-        self.cov=np.dot(partial_cov, partial_cov.transpose()) #Pos-def by construction
-        self.fakedata=self.generateFakeData()
-        if self.verbose:
-            print("Constructed new fakeData object")
-    
-    def updateVerbose(self, newverbose):
-        if not isinstance(newverbose,bool):
-            raise TypeError("Verbosity must be of type bool")
-        self.verbose=newverbose
-        print(f"verbosity now set to {newverbose}")
-        return self.verbose
-    
-    def getDim(self,spacedim):
-        if spacedim<=0:
-            raise ValueError(f"Total spatial dimensions must be >0, not {spacedim}")
-        return spacedim
-    
-    #user inputted fake data size
-    def updateFakeDataSize(self, updatedvalue):
-        if updatedvalue<=0:
-            raise ValueError(f"total size of fake data cannot be {updatedvalue}, must be >0")
-        self.nfakedata=updatedvalue
-        return self.nfakedata
-    
-    def fakeDataPoint(self):
-        #Makes an spacedim-dimensional gaussian centered on rand([-1,1) with std (0,01,1)
-        return np.random.multivariate_normal(self.mean,self.cov,self.spacedim)
-    
-    
-    def generateFakeData(self):
-        #array to be filled with fake data point 
-        self.fakedata=[]
-        i=0
-        print(f"Making {self.nfakedata} fake data points")
-        while i<self.nfakedata:
-            self.fakedata.append(self.fakeDataPoint())
-            i+=1
-        return self.fakedata
-            
-    def fakeDataArr(self):
-        return self.fakedata
-        
+import scipy.stats
+from matplotlib import pyplot as plt
+import multiprocessing as mp
 
-    
-class MetropolisHastings(fakeData):
-    #Whilst coding this myself is unecessary (AND SLOW), I just want to 
-    #get a better understanding of the algorithm
-    def __init__(self, nsteps, spacedim, stepsizes):
+
+class mcmc:
+    def __init__(self, spacedim=10):
+        
+        self.spacedim=spacedim
+        self.mu=np.random.randn(spacedim)
+        
+        #Make cov matrix
+        sqrt_cov=np.random.randn(spacedim,spacedim)
+        self.cov=np.dot(sqrt_cov,sqrt_cov.T)
+        self.acceptedsteps=[]
+        self.numberaccepted=0
+        self.acceptedllhs=[]
+        self.stepmatrix=[]
+        self.nsteps=0
+        
+    def loglikelihood(self,x):
         '''
-        Does mcmc for some space for nsteps steps given an array of stepsizes
 
         Parameters
         ----------
-        nsteps : Total MCMC steps.
-        spacedim : Spatial Dimension.
-        stepsizes : Array of step sizes (must be same size as spacedim)
+        x : Proposed point
 
         Returns
         -------
-        None.
+        TYPE
+            Does LLH calc for this boi
 
         '''
-        if len(stepsizes!=spacedim):
-            raise ValueError("Total length of step sizes must match spatial dimension")
+        if np.all(x < 50) and np.all(x > -50):
+            return scipy.stats.multivariate_normal(mean=self.mu, cov=self.cov).logpdf(x)
+        else:
+            return -1e6
+    
+    def acceptFunc(self, curr_step, prop_step):
+        alpha=np.random.uniform(0,1)
+        fact=min(1,np.exp(prop_step-curr_step))
+        if alpha<fact:
+            return True
+        else:
+            return False
+        
+    def proposeStep(self,curr_step):
+        prop_step = curr_step + np.dot(self.stepmatrix, np.random.randn(len(curr_step)))
+        return prop_step
+    
+    def __call__(self, startpos, stepsize=None, nsteps=10000):
+        
+        self.nsteps=nsteps
+        
+        if stepsize==None:
+            stepsize=np.ones(self.spacedim)
+        self.stepmatrix=np.diag(stepsize)
+        
+        #setup mcmc
+        curr_step=startpos
+        curr_llh=self.loglikelihood(startpos)
+        
+        
+        self.acceptedsteps=np.zeros((nsteps,self.spacedim))
+        self.acceptedllhs=np.zeros(nsteps)
+        
+        self.acceptedsteps[0]=curr_step
+        self.acceptedllhs[0]=curr_llh
+        
+        stepcount=1
+        self.numberaccepted=1
+        while stepcount<nsteps:
+            if stepcount%np.floor(nsteps/10)==0:
+                print(f"Completed {stepcount}/{nsteps} steps, accepted {self.numberaccepted}")
             
+            
+            prop_step=self.proposeStep(curr_step)
+            prop_llh=self.loglikelihood(prop_step)
+            if self.acceptFunc(curr_llh, prop_llh):
+                curr_step=prop_step
+                curr_llh=prop_llh
+                self.numberaccepted+=1
+
+            self.acceptedsteps[stepcount]=curr_step
+            self.acceptedllhs[stepcount]=curr_llh
+            
+            stepcount+=1
+        return self.acceptedsteps, self.acceptedllhs
+    
+    def autocorrs(self,totlag=1000):
+        print("Making Autocorrelations")
+        a_pool=mp.Pool()
+        autocorrarr=a_pool.map(self.autocalc, range(totlag))
+        return autocorrarr
+   
+    def autocalc(self, k):
+        parammeans=self.acceptedsteps.mean(0)
         
-        fakeData.__init__(self, spacedim,10000)
-        #Start from some point
-        self.prevstep=np.ones(spacedim)
-        self.propstep=np.ones(spacedim)
-        
-        self.stepMatrix=np.diag(stepsizes)
-        
+        num_k=np.zeros(self.spacedim)
+        denom_k=np.zeros(self.spacedim)
         
     
-    def accept_reject(self, prev_llh, curr_llh):
-        acc_prob=random.uniform(0,1)
-        return ((acc_prob<min(1,np.exp(curr_llh-prev_llh))))
-    
-    
-    def proposeStep(self,stepsize):
-        #proposes a new step
-        return np.random.multivariate_normal(self.prevstep, self.stepMatrix, self.spacedim)
-    
-    def llh_calc(self):
+        for i in range(self.nsteps):
+            #((x_i-xbar)
+            x_i = self.acceptedsteps[i]-parammeans
+            x_i2=x_i**2
+            
+            if i<self.nsteps-k:
+                x_ik=self.acceptedsteps[i+k]-parammeans
+                num_k+=x_ik*x_i
+                
+            denom_k+=x_i2
+        return num_k/denom_k
         
-    
-    
-    
-    
-    
+
+if __name__== "__main__":
+    x=mcmc(10)
+    xacc, xllhs= x(np.zeros(10),nsteps=100000)
+    x_auto=x.autocorrs(1000)
+    plt.plot(x_auto)
+    plt.show()
+        
+        
