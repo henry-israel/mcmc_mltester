@@ -2,23 +2,34 @@ import numpy as np
 import scipy.stats
 from matplotlib import pyplot as plt
 import multiprocessing as mp
+import keras
+from keras.models import Sequential
+from keras.layers import Dense
 
 
 class mcmc:
-    def __init__(self, spacedim=10):
+    def __init__(self, spacedim=10, data=None):
         
         self.spacedim=spacedim
-        self.mu=np.random.randn(spacedim)
         
-        #Make cov matrix
-        sqrt_cov=np.random.randn(spacedim,spacedim)
+        if data!=None:
+            self.mu=data[0]
+            self.cov=data[1]
+            self.spacedim=len(self.mu)
+       
+        else:
+            self.mu=np.random.randn(spacedim)
+            #Make cov matrix
+            sqrt_cov=np.random.randn(spacedim,spacedim)
+
+
         self.cov=np.dot(sqrt_cov,sqrt_cov.T)
         self.acceptedsteps=[]
         self.numberaccepted=0
         self.acceptedllhs=[]
         self.stepmatrix=[]
         self.nsteps=0
-        
+    
     def loglikelihood(self,x):
         '''
 
@@ -90,8 +101,13 @@ class mcmc:
     
     def autocorrs(self,totlag=1000):
         print("Making Autocorrelations")
-        a_pool=mp.Pool()
-        autocorrarr=a_pool.map(self.autocalc, range(totlag))
+        if "daemon" not in mp.current_process()._config:
+            a_pool=mp.Pool()
+            autocorrarr=a_pool.map(self.autocalc, range(totlag))
+        else:
+            autocorrarr=np.empty((totlag, self.spacedim))
+            for k in range(totlag):
+                autocorrarr[k]=self.autocalc(k)
         return autocorrarr
    
     def autocalc(self, k):
@@ -113,12 +129,37 @@ class mcmc:
             denom_k+=x_i2
         return num_k/denom_k
         
+class mcmc_ml():
+    def __init__(self,trainsize=10000):
+        self.trainsize=trainsize
+
+    def createTrain(self, i):
+        #generate mcmc instance
+        #i just a placeholder!
+        mc=mcmc(10)
+        mc_acc, mc_llh=mc(np.random.randn(10),nsteps=10000)
+        mcauto=mc.autocorrs(1000)
+        return [mc_acc, mc_llh, mcauto]
+    
+    def generateTrainingSet(self):
+        b_pool=mp.Pool()
+        train_arr=b_pool.map(self.createTrain, range(self.trainsize))
+        # train_arr=[]
+        # for i in range(self.trainsize):
+        #     train_arr.append(self.createTrain(i))
+        return train_arr
+        
+    #Here's the idea:
+        # Generate step size
+        # 1 run standard NN training 
+        # Whoever win the NN decides the step size
+        # Need way to shrink variance of each step in a smart way
+
+    def
+
+        
 
 if __name__== "__main__":
-    x=mcmc(10)
-    xacc, xllhs= x(np.zeros(10),nsteps=100000)
-    x_auto=x.autocorrs(1000)
-    plt.plot(x_auto)
-    plt.show()
-        
+    x=mcmc_ml(2)
+    trset = x.generateTrainingSet()
         
