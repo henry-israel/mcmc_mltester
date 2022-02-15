@@ -10,7 +10,7 @@ from keras.layers import Dense
 import time
 
 class process_data:
-    def __init__(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False)
+    def __init__(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
         self._appenddata=False #Append to previous array when running
         self._llhbins=llhbins
         self._autocorr_integral_split=autocorr_integral_split
@@ -34,7 +34,7 @@ class process_data:
     def updateAutoCorrReduceSize(self,updatedsize):
         self._autocorr_reducesize=updatedsize
 
-    def setInputParams(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50)
+    def setInputParams(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50):
         self.updateData(dataset)
         self.updateLLHBins(llhbins)
         self.updateAutoCorrIntegralSplit(autocorr_integral_split)
@@ -267,7 +267,7 @@ class mcmc:
         
 class mcmc_training_gen(process_data):
     def __init__(self,trainsize=10, mcmcdim=10, mcmcsteps=10000, autocorrlag=1000, mcmc_stepsizes=None):
-        super.__init__()
+        process_data.__init__(self)
         self._trainsize=trainsize #amount of training data we want
         self._mcmcdim=mcmcdim #mcmc dimension
         self._mcmcsteps=mcmcsteps #mcmc steps to run
