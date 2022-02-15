@@ -9,6 +9,95 @@ from keras.models import Sequential
 from keras.layers import Dense
 import time
 
+class process_data:
+    def __init__(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False)
+        self._appenddata=False #Append to previous array when running
+        self._llhbins=llhbins
+        self._autocorr_integral_split=autocorr_integral_split
+        self._autocorr_reducesize=autocorr_reduce_size
+        self._appenddata=append_data
+        self._dataset=dataset
+        self._processed_data=pd.DataFrame()     
+
+    #Training Data Processing
+    def updateData(self,updatedata):
+        self._dataset=updatedata
+
+    def updateLLHBins(self,updatedbinsize):
+        self._llhbins=updatedbinsize
+        return 1
+    
+    def updateAutoCorrIntegralSplit(self,updatedsplit):
+        self._autocorr_integral_split=updatedsplit
+        return 1
+    
+    def updateAutoCorrReduceSize(self,updatedsize):
+        self._autocorr_reducesize=updatedsize
+
+    def setInputParams(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50)
+        self.updateData(dataset)
+        self.updateLLHBins(llhbins)
+        self.updateAutoCorrIntegralSplit(autocorr_integral_split)
+        self.updateAutoCorrReduceSize(autocorr_reduce_size)
+
+    
+    def binMeansDataSet(self, indata, nbins=20): 
+        #Splits data into nbins, then takes mean
+        return [np.mean(x) for x in np.split(indata,nbins)]
+
+    def binMaxDataSet(self,indata,nbins=20):
+        #Splits data into nbins, then takes max of each bin
+        return [np.max(x) for x in np.split(indata, 20)]
+
+    def integrateData(self, indata, nbins=30):
+        #Integrate data numerically by splitting in number of bins (also normalises it!)
+        hbins=self.binMaxDataSet(indata,nbins)
+        return np.sum(hbins)/nbins
+
+    def getNthElements(self,indata,nelement):
+        #Grabs every nth entry
+        return [x[0] for x in np.split(indata,nelement)]
+    #Can add more metrics where necessary!
+
+    def updateProcessedData(self,updateddata):
+        if self._appenddata:
+            if updateddata.top() != self._processed_data.top:
+                raise ValueError("headers for updated data do not match those of already present data!")
+            pd.concat(self._processed_data,updateddata)
+        else:
+            self._processed_data=updateddata
+        return 1
+    
+    def getProcessedData(self):
+        return self._processed_data
+
+    def processTrainData(self, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
+
+        self._appenddata=append_data
+        trset=np.array(self._trainarr,dtype=object)
+#        print(trset)
+#        print(len(trset))
+        mc_acc=trset[:,0]
+        mc_llh=trset[:,1]
+        mc_auto=trset[:,2]
+
+        #For now let's do mean-binning for llhs
+        processed_llh=[self.binMeansDataSet(i,llhbins) for i in mc_llh]
+        #Autocorrs require a different treatment
+        integrateautocorr=[self.integrateData(i,autocorr_integral_split) for i in mc_auto]
+        #Reduce number of points (Mean pooling may smear useful features, will need investigating!)
+        reduced_autocorr=[self.getNthElements(i, autocorr_reduce_size) for i in mc_auto]
+
+        #Let's make a massive dataframe!
+        process_df=pd.DataFrame()
+        process_df["Acceptance Rate"]=mc_acc
+        process_df["Integrated Autocorrelation"]=integrateautocorr
+        process_df["Reduced Auto Corr"]=reduced_autocorr
+        process_df["Binned LLH"]=processed_llh
+
+        self.updateProcessedData(process_df)
+        return process_df
+
 
 class mcmc:
     def __init__(self, spacedim=10, data=None):
@@ -176,9 +265,9 @@ class mcmc:
             denom_k+=x_i2
         return num_k/denom_k
         
-class mcmc_training_gen():
+class mcmc_training_gen(process_data):
     def __init__(self,trainsize=10, mcmcdim=10, mcmcsteps=10000, autocorrlag=1000, mcmc_stepsizes=None):
-        
+        super.__init__()
         self._trainsize=trainsize #amount of training data we want
         self._mcmcdim=mcmcdim #mcmc dimension
         self._mcmcsteps=mcmcsteps #mcmc steps to run
@@ -188,7 +277,6 @@ class mcmc_training_gen():
         self._trainarr=[]
         
         self._processed_data=pd.DataFrame()     
-        #Processing stuff
 
     def getMCMCStepSizes(self):
         return self._mcmc_stepsizes
@@ -252,64 +340,6 @@ class mcmc_training_gen():
         #     train_arr.append(self.createTrain(i))
         self.updateTrainData(train_arr)
         return train_arr
-    
-    #Training Data Processing
-    def binMeansDataSet(self, indata, nbins=20): 
-        #Splits data into nbins, then takes mean
-        return [np.mean(x) for x in np.split(indata,nbins)]
-
-    def binMaxDataSet(self,indata,nbins=20):
-        #Splits data into nbins, then takes max of each bin
-        return [np.max(x) for x in np.split(indata, 20)]
-
-    def integrateData(self, indata, nbins=30):
-        #Integrate data numerically by splitting in number of bins (also normalises it!)
-        hbins=self.binMaxDataSet(indata,nbins)
-        return np.sum(hbins)/nbins
-
-    def getNthElements(self,indata,nelement):
-        #Grabs every nth entry
-        return [x[0] for x in np.split(indata,nelement)]
-    #Can add more metrics where necessary!
-
-    def updateProcessedData(self,updateddata):
-        if self._appenddata:
-            if updateddata.top() != self._processed_data.top:
-                raise ValueError("headers for updated data do not match those of already present data!")
-            pd.concat(self._processed_data,updateddata)
-        else:
-            self._processed_data=updateddata
-        return 1
-    
-    def getProcessedData(self):
-        return self._processed_data
-
-    def processTrainData(self, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
-
-        self._appenddata=append_data
-        trset=np.array(self._trainarr,dtype=object)
-#        print(trset)
-#        print(len(trset))
-        mc_acc=trset[:,0]
-        mc_llh=trset[:,1]
-        mc_auto=trset[:,2]
-
-        #For now let's do mean-binning for llhs
-        processed_llh=[self.binMeansDataSet(i,llhbins) for i in mc_llh]
-        #Autocorrs require a different treatment
-        integrateautocorr=[self.integrateData(i,autocorr_integral_split) for i in mc_auto]
-        #Reduce number of points (Mean pooling may smear useful features, will need investigating!)
-        reduced_autocorr=[self.getNthElements(i, autocorr_reduce_size) for i in mc_auto]
-
-        #Let's make a massive dataframe!
-        process_df=pd.DataFrame()
-        process_df["Acceptance Rate"]=mc_acc
-        process_df["Integrated Autocorrelation"]=integrateautocorr
-        process_df["Reduced Auto Corr"]=reduced_autocorr
-        process_df["Binned LLH"]=processed_llh
-
-        self.updateProcessedData(process_df)
-        return process_df
 
     def __call__(self, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
         #llhbins = number of llh bins
@@ -317,6 +347,8 @@ class mcmc_training_gen():
         #autocorr_reduce_size= how much to reduce autocorrelation by
         #append_data -> append data?
         self.generateTrainingData()
+        #Set inputs for processing training data!
+        self.setInputParams(self.getTrainData(), llhbins, autocorr_integral_split, autocorr_reduce_size)
         self.processTrainData(llhbins, autocorr_integral_split, autocorr_reduce_size, append_data)
         print("Processed data set has been created!")
         
