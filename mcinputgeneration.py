@@ -9,27 +9,69 @@ from keras.layers import Dense
 
 class mcmc:
     def __init__(self, spacedim=10, data=None):
-        
-        self.spacedim=spacedim
-        
-        if data!=None:
-            self.mu=data[0]
-            self.cov=data[1]
-            self.spacedim=len(self.mu)
+
+        self._data=data    
+        self._spacedim=spacedim
+
+
+        if data is not None:
+            self._mu=data[0]
+            self._cov=data[1]
+            self._spacedim=len(self._mu)
        
         else:
-            self.mu=np.random.randn(spacedim)
+            self._mu=np.random.randn(spacedim)
             #Make cov matrix
             sqrt_cov=np.random.randn(spacedim,spacedim)
 
 
-        self.cov=np.dot(sqrt_cov,sqrt_cov.T)
-        self.acceptedsteps=[]
-        self.numberaccepted=0
-        self.acceptedllhs=[]
-        self.stepmatrix=[]
-        self.nsteps=0
+        self._cov=np.dot(sqrt_cov,sqrt_cov.T)
+        self._acceptedsteps=[]
+        self._numberaccepted=0
+        self._acceptedllhs=[]
+        self._stepmatrix=[]
+        self._nsteps=0
     
+    def getData(self):
+        return self._data
+
+    def updateInputData(self,updated_data):
+        self.__init__(self._spacedim,updated_data)
+        return 1
+
+    def getMeanVal(self):
+        return self._mu
+
+    def updateMeanVal(self,update_mu):
+        self._mu=update_mu
+        return 1
+    
+    def getCov(self):
+        return self._cov
+    
+    def updateCov(self,updated_cov):
+        self._cov=updated_cov
+        return 1
+
+    def getSpaceDim(self):
+        return self._spacedim
+
+    def updateSpaceDim(self,updated_dim):
+        self._spacedim=updated_dim
+        return 1
+
+    def getAcceptedSteps(self):
+        return self._acceptedsteps
+
+    def getStepMatrix(self):
+        return self._stepmatrix
+
+    def getAcceptedLLHS(self):
+        return self._acceptedllhs
+
+    def getNSteps(self):
+        return self._nsteps
+
     def loglikelihood(self,x):
         '''
 
@@ -44,7 +86,7 @@ class mcmc:
 
         '''
         if np.all(x < 50) and np.all(x > -50):
-            return scipy.stats.multivariate_normal(mean=self.mu, cov=self.cov).logpdf(x)
+            return scipy.stats.multivariate_normal(mean=self._mu, cov=self._cov).logpdf(x)
         else:
             return -1e6
     
@@ -57,33 +99,33 @@ class mcmc:
             return False
         
     def proposeStep(self,curr_step):
-        prop_step = curr_step + np.dot(self.stepmatrix, np.random.randn(len(curr_step)))
+        prop_step = curr_step + np.dot(self._stepmatrix, np.random.randn(len(curr_step)))
         return prop_step
     
     def __call__(self, startpos, stepsize=None, nsteps=10000):
         
-        self.nsteps=nsteps
+        self._nsteps=nsteps
         
-        if stepsize==None:
-            stepsize=np.ones(self.spacedim)
-        self.stepmatrix=np.diag(stepsize)
+        if stepsize is None:
+            stepsize=np.ones(self._spacedim)
+        self._stepmatrix=np.diag(stepsize)
         
         #setup mcmc
         curr_step=startpos
         curr_llh=self.loglikelihood(startpos)
         
         
-        self.acceptedsteps=np.zeros((nsteps,self.spacedim))
-        self.acceptedllhs=np.zeros(nsteps)
+        self._acceptedsteps=np.zeros((nsteps,self._spacedim))
+        self._acceptedllhs=np.zeros(nsteps)
         
-        self.acceptedsteps[0]=curr_step
-        self.acceptedllhs[0]=curr_llh
+        self._acceptedsteps[0]=curr_step
+        self._acceptedllhs[0]=curr_llh
         
         stepcount=1
-        self.numberaccepted=1
+        self._numberaccepted=1
         while stepcount<nsteps:
             if stepcount%np.floor(nsteps/10)==0:
-                print(f"Completed {stepcount}/{nsteps} steps, accepted {self.numberaccepted}")
+                print(f"Completed {stepcount}/{nsteps} steps, accepted {self._numberaccepted}")
             
             
             prop_step=self.proposeStep(curr_step)
@@ -91,13 +133,13 @@ class mcmc:
             if self.acceptFunc(curr_llh, prop_llh):
                 curr_step=prop_step
                 curr_llh=prop_llh
-                self.numberaccepted+=1
+                self._numberaccepted+=1
 
-            self.acceptedsteps[stepcount]=curr_step
-            self.acceptedllhs[stepcount]=curr_llh
+            self._acceptedsteps[stepcount]=curr_step
+            self._acceptedllhs[stepcount]=curr_llh
             
             stepcount+=1
-        return self.acceptedsteps, self.acceptedllhs
+        return self._acceptedsteps, self._acceptedllhs
     
     def autocorrs(self,totlag=1000):
         print("Making Autocorrelations")
@@ -105,48 +147,88 @@ class mcmc:
             a_pool=mp.Pool()
             autocorrarr=a_pool.map(self.autocalc, range(totlag))
         else:
-            autocorrarr=np.empty((totlag, self.spacedim))
+            autocorrarr=np.empty((totlag, self._spacedim))
             for k in range(totlag):
                 autocorrarr[k]=self.autocalc(k)
         return autocorrarr
    
     def autocalc(self, k):
-        parammeans=self.acceptedsteps.mean(0)
+        parammeans=self._acceptedsteps.mean(0)
         
-        num_k=np.zeros(self.spacedim)
-        denom_k=np.zeros(self.spacedim)
+        num_k=np.zeros(self._spacedim)
+        denom_k=np.zeros(self._spacedim)
         
     
-        for i in range(self.nsteps):
+        for i in range(self._nsteps):
             #((x_i-xbar)
-            x_i = self.acceptedsteps[i]-parammeans
+            x_i = self._acceptedsteps[i]-parammeans
             x_i2=x_i**2
             
-            if i<self.nsteps-k:
-                x_ik=self.acceptedsteps[i+k]-parammeans
+            if i<self._nsteps-k:
+                x_ik=self._acceptedsteps[i+k]-parammeans
                 num_k+=x_ik*x_i
                 
             denom_k+=x_i2
         return num_k/denom_k
         
-class mcmc_ml():
-    def __init__(self,trainsize=10000):
-        self.trainsize=trainsize
+class mcmc_training_gen():
+    def __init__(self,trainsize=10000, mcmcdim=10, mcmcsteps=10000, autocorrlag=1000):
+        
+        self._trainsize=trainsize #amount of training data we want
+        self._mcmcdim=mcmcdim #mcmc dimension
+        self._mcmcsteps=mcmcsteps #mcmc steps to run
+        self._autocorrlag=autocorrlag #lag on autocorrelations
+        self._trainarr=[]
+    
+
+    def getMCMCDim(self):
+        return self._mcmcdim
+    
+    def updateMCMCDim(self,updated_mcmcdimval):
+        self._mcmcdim=updated_mcmcdimval
+        return 1
+    
+    def getMCMCSteps(self):
+        return self._mcmcsteps
+
+    def updateMCMCSteps(self,updated_mcmcstepsval):
+        self._mcmcsteps=updated_mcmcstepsval
+        return 1
+    
+    def updateAutoCorrLag(self, updated_lagval):
+        self._autocorrlag=updated_lagval
+        return 1
+    
+    def getAutoCorrLag(self):
+        return self._autocorrlag
+
+    def updateTrainData(self, update_arr,append_vals=False):
+        #Updates the array of training data
+        #can either append values or overwrite
+        if append_vals:
+            self._trainarr.append(update_arr)
+        else:
+            self._trainarr=update_arr
+        return 1
+
+    def getTrainData(self):
+        return self._trainarr
 
     def createTrain(self, i):
         #generate mcmc instance
         #i just a placeholder!
-        mc=mcmc(10)
-        mc_acc, mc_llh=mc(np.random.randn(10),nsteps=10000)
-        mcauto=mc.autocorrs(1000)
+        mc=mcmc(self._mcmcdim)
+        mc_acc, mc_llh=mc(np.random.randn(self._mcmcdim),nsteps=self._mcmsteps)
+        mcauto=mc.autocorrs(self._autocorrlag)
         return [mc_acc, mc_llh, mcauto]
     
-    def generateTrainingSet(self):
+    def __call__(self,append_vals=True):
         b_pool=mp.Pool()
-        train_arr=b_pool.map(self.createTrain, range(self.trainsize))
+        train_arr=b_pool.map(self.createTrain, range(self._trainsize))
         # train_arr=[]
         # for i in range(self.trainsize):
         #     train_arr.append(self.createTrain(i))
+        self.updateTrainData(train_arr,append_vals)
         return train_arr
         
     #Here's the idea:
@@ -154,12 +236,10 @@ class mcmc_ml():
         # 1 run standard NN training 
         # Whoever win the NN decides the step size
         # Need way to shrink variance of each step in a smart way
+      
 
-    def
 
-        
 
 if __name__== "__main__":
     x=mcmc_ml(2)
-    trset = x.generateTrainingSet()
-        
+    trset = x()
