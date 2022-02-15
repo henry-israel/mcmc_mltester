@@ -123,7 +123,8 @@ class mcmc:
         self._acceptedllhs=[]
         self._stepmatrix=[]
         self._nsteps=0
-    
+        self._local_state=np.random.RandomState(None)
+
     def getData(self):
         return self._data
 
@@ -183,7 +184,7 @@ class mcmc:
             return -1e6
     
     def acceptFunc(self, curr_step, prop_step):
-        alpha=np.random.uniform(0,1)
+        alpha=self._local_state.uniform(0,1)
         fact=min(1,np.exp(prop_step-curr_step))
         if alpha<fact:
             return True
@@ -191,7 +192,7 @@ class mcmc:
             return False
         
     def proposeStep(self,curr_step):
-        prop_step = curr_step + np.dot(self._stepmatrix, np.random.randn(len(curr_step)))
+        prop_step = curr_step + np.dot(self._stepmatrix, self._local_state.randn(len(curr_step)))
         return prop_step
     
     def __call__(self, startpos, stepsize=None, nsteps=10000):
@@ -361,4 +362,4 @@ class mcmc_training_gen(process_data):
 if __name__== "__main__":
     traindata=mcmc_training_gen(2,autocorrlag=200)
     traindata()
-    print(traindata.getProcessedData())
+    traindf=traindata.getProcessedData()
