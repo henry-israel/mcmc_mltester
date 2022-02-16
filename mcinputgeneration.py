@@ -353,6 +353,10 @@ class mcmc_training_gen(process_data):
         self.processTrainData(llhbins, autocorr_integral_split, autocorr_reduce_size, append_data)
         print("Processed data set has been created!")
         
+    def saveToCSV(self,outputname):
+        outputdata=self.getProcessedData()
+        outputdata.to_csv(f"{outputname}.csv")
+        print(f"Saved data to {outputname}.csv")
 
     #Here's the idea:
         # Generate step size
@@ -360,6 +364,7 @@ class mcmc_training_gen(process_data):
         # Whoever win the NN decides the step size
         # Need way to shrink variance of each step in a smart way
 if __name__== "__main__":
-    traindata=mcmc_training_gen(2,autocorrlag=200)
+    traindata=mcmc_training_gen(20,autocorrlag=200)
     traindata()
+    traindata.saveToCSV("testout")
     traindf=traindata.getProcessedData()
