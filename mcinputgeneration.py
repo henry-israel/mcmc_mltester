@@ -2,7 +2,7 @@ import numpy as np
 import scipy.stats
 import pandas as pd
 from matplotlib import pyplot as plt
-#import multiprocessing as mp
+import multiprocessing as mp
 from keras.models import Sequential
 from keras.layers import Dense, Normalization, Conv1D, MaxPooling1D, Dropout
 #from numba import config, njit, threading_layer
@@ -189,6 +189,11 @@ class multi_mcmc():
             self._data=[mu,cov]
         else:
             self._data=data
+        pool_size = mp.cpu_count()
+        self._chunksize, extra = divmod(self._nchains, pool_size* 4)
+        if extra:
+            self._chunksize+=1
+
 
         self._paramarr=np.empty(nchains, object)
         for i in range(nchains):
@@ -212,7 +217,7 @@ class multi_mcmc():
             return acceptancerate
 
     def runMCMC(self)->list:
-        acceptarr=process_map(self.runmcmc, range(self._nchains))
+        acceptarr=process_map(self.runmcmc, range(self._nchains), chunksize=self._chunksize)
         # train_arr=[]
         # for i in range(self.trainsize):
         #     train_arr.append(self.createTrain(i))
@@ -322,8 +327,8 @@ class classifier():
 
 if __name__== "__main__":
     #Run a load of MCMC
-    mc_runner=multi_mcmc(nchains=2000, spacedim=100, nsteps=10000)
+    mc_runner=multi_mcmc(nchains=100, spacedim=100, nsteps=1000)
     mc_runner('test.csv')
 
-    cfier=classifier('test.csv', ['Acceptance_Rate'])
-    cfier()
+    # cfier=classifier('test.csv', ['Acceptance_Rate'])
+    # cfier()
