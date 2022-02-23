@@ -4,9 +4,9 @@ import pandas as pd
 from matplotlib import pyplot as plt
 import multiprocessing as mp
 from keras.models import Sequential
-from keras.layers import Dense
-from numba import config, njit, threading_layer
-
+from keras.layers import Dense, Normalization, Conv1D, MaxPooling1D, Dropout
+#from numba import config, njit, threading_layer
+import tensorflow as tf
 ######################################
 
 class mcmc:
@@ -228,7 +228,7 @@ class multi_mcmc():
             data[f'Step_{j}']=step_arr
 
         dftosave=pd.DataFrame(data)
-        dftosave.to_csv(output)
+        dftosave.to_csv(output, index=False)
         print(f"Saved to {output}")
 
     def __call__(self, output: str)->None:
@@ -260,29 +260,35 @@ class classifier():
         self._hyperparams=hyperparams
 
         fulldata=pd.read_csv(data_file)
-        
+        print(fulldata)
         try:
-            self._labeldf=fulldata.loc(optimise_par_names)
+            self._labeldf=fulldata[optimise_par_names]
         except ValueError:
             print(f"{optimise_par_names} is not in {data_file}")
         except:
-            print(f"Sorry, something's gone wrong with your labels")
+            raise Exception(f"Sorry, something's gone wrong with your labels")
 
-        self._data_df=fulldata.drop(optimise_par_names, axis=1)
-        if len(self._data_df)==0:
+        data_df=fulldata.drop(optimise_par_names, axis=1)
+        self._inputsize=len(data_df)
+        if self._inputsize==0:
             raise ValueError("Test data must have length > 0")
+        self._data_tensor=tf.convert_to_tensor(data_df)
+        self._data_tensor=tf.reshape(self._data_tensor, (100,10))
+        print(self._data_tensor)
 
-        self._model = Sequential()
-        self.setupBasicClassifier()
+        normaliser = Normalization(axis=-1)
+        normaliser.adapt(self._data_tensor)
+        self._model = Sequential([normaliser])
+        self.setupNeuralNet()
 
 
     def getLabels(self)->list:
         return self._labels
 
-    def getDataDataFrame(self):
-        return self._data_df
+    def getDataTensor(self):
+        return self._data_tensor
 
-    def getLabelDataFrame(self):
+    def getLabelDataFrame(self)->pd.DataFrame:
         return self._labeldf
 
     def getClassifier(self):
@@ -291,16 +297,21 @@ class classifier():
     def getModel(self):
         return self._model
 
-    def setupBasicClassifier(self):
+    def setupNeuralNet(self)->None:
+        #HARDCODED BAD DON'T DO THIS!
         #This is where the classifier lives, obviously this can be tuned. Need to make more customisable!
-        self._model.add(Dense(12, input_dim=8, activation='relu'))
+        self._model.add(Conv1D(32, 3, input_shape=(10, 100), activation='relu')) #Let's be spicy and add a conv alyer
+        self._model.add(MaxPooling1D(3))
+        self._model.add(Dropout(0.2))
         self._model.add(Dense(8, activation='relu'))
         self._model.add(Dense(1, activation='sigmoid'))
 
-    def __call__(self):
         self._model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
-        self._model.fit(self._data_df, self._labeldf, epochs=150, batch_size=10)
-        _, accuracy = self._model.evaluate(self._data_df, self._labeldf)
+
+    def __call__(self):
+ 
+        self._model.fit(self._data_tensor, self._labeldf, epochs=150, batch_size=100)
+        _, accuracy = self._model.evaluate(self._data_tensor, self._labeldf)
         print(f"accuracy is {accuracy}")
 
 
@@ -310,7 +321,7 @@ class classifier():
 
 if __name__== "__main__":
     #Run a load of MCMC
-    mc_runner=multi_mcmc()
+    mc_runner=multi_mcmc(nchains=2000, spacedim=100, nsteps=10000)
     mc_runner('test.csv')
 
     cfier=classifier('test.csv', ['Acceptance_Rate'])
