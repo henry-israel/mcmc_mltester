@@ -2,11 +2,13 @@ import numpy as np
 import scipy.stats
 import pandas as pd
 from matplotlib import pyplot as plt
-import multiprocessing as mp
+#import multiprocessing as mp
 from keras.models import Sequential
 from keras.layers import Dense, Normalization, Conv1D, MaxPooling1D, Dropout
 #from numba import config, njit, threading_layer
 import tensorflow as tf
+from tqdm.contrib.concurrent import process_map
+
 ######################################
 
 class mcmc:
@@ -210,8 +212,7 @@ class multi_mcmc():
             return acceptancerate
 
     def runMCMC(self)->list:
-        b_pool=mp.Pool()
-        acceptarr=b_pool.map(self.runmcmc, range(self._nchains))
+        acceptarr=process_map(self.runmcmc, range(self._nchains))
         # train_arr=[]
         # for i in range(self.trainsize):
         #     train_arr.append(self.createTrain(i))
