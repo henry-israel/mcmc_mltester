@@ -1,106 +1,16 @@
-import string
 import numpy as np
 import scipy.stats
 import pandas as pd
 from matplotlib import pyplot as plt
 import multiprocessing as mp
-import keras
 from keras.models import Sequential
 from keras.layers import Dense
-import time
+from numba import config, njit, threading_layer
 
-class process_data:
-    def __init__(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
-        self._appenddata=False #Append to previous array when running
-        self._llhbins=llhbins
-        self._autocorr_integral_split=autocorr_integral_split
-        self._autocorr_reducesize=autocorr_reduce_size
-        self._appenddata=append_data
-        self._dataset=dataset
-        self._processed_data=pd.DataFrame()     
-
-    #Training Data Processing
-    def updateData(self,updatedata):
-        self._dataset=updatedata
-
-    def updateLLHBins(self,updatedbinsize):
-        self._llhbins=updatedbinsize
-        return 1
-    
-    def updateAutoCorrIntegralSplit(self,updatedsplit):
-        self._autocorr_integral_split=updatedsplit
-        return 1
-    
-    def updateAutoCorrReduceSize(self,updatedsize):
-        self._autocorr_reducesize=updatedsize
-
-    def setInputParams(self, dataset=None, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50):
-        self.updateData(dataset)
-        self.updateLLHBins(llhbins)
-        self.updateAutoCorrIntegralSplit(autocorr_integral_split)
-        self.updateAutoCorrReduceSize(autocorr_reduce_size)
-
-    
-    def binMeansDataSet(self, indata, nbins=20): 
-        #Splits data into nbins, then takes mean
-        return [np.mean(x) for x in np.split(indata,nbins)]
-
-    def binMaxDataSet(self,indata,nbins=20):
-        #Splits data into nbins, then takes max of each bin
-        return [np.max(x) for x in np.split(indata, 20)]
-
-    def integrateData(self, indata, nbins=30):
-        #Integrate data numerically by splitting in number of bins (also normalises it!)
-        hbins=self.binMaxDataSet(indata,nbins)
-        return np.sum(hbins)/nbins
-
-    def getNthElements(self,indata,nelement):
-        #Grabs every nth entry
-        return [x[0] for x in np.split(indata,nelement)]
-    #Can add more metrics where necessary!
-
-    def updateProcessedData(self,updateddata):
-        if self._appenddata:
-            if updateddata.top() != self._processed_data.top:
-                raise ValueError("headers for updated data do not match those of already present data!")
-            pd.concat(self._processed_data,updateddata)
-        else:
-            self._processed_data=updateddata
-        return 1
-    
-    def getProcessedData(self):
-        return self._processed_data
-
-    def processTrainData(self, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
-
-        self._appenddata=append_data
-        trset=np.array(self._trainarr,dtype=object)
-#        print(trset)
-#        print(len(trset))
-        mc_acc=trset[:,0]
-        mc_llh=trset[:,1]
-        mc_auto=trset[:,2]
-
-        #For now let's do mean-binning for llhs
-        processed_llh=[self.binMeansDataSet(i,llhbins) for i in mc_llh]
-        #Autocorrs require a different treatment
-        integrateautocorr=[self.integrateData(i,autocorr_integral_split) for i in mc_auto]
-        #Reduce number of points (Mean pooling may smear useful features, will need investigating!)
-        reduced_autocorr=[self.getNthElements(i, autocorr_reduce_size) for i in mc_auto]
-
-        #Let's make a massive dataframe!
-        process_df=pd.DataFrame()
-        process_df["Acceptance Rate"]=mc_acc
-        process_df["Integrated Autocorrelation"]=integrateautocorr
-        process_df["Reduced Auto Corr"]=reduced_autocorr
-        process_df["Binned LLH"]=processed_llh
-
-        self.updateProcessedData(process_df)
-        return process_df
-
+######################################
 
 class mcmc:
-    def __init__(self, spacedim=10, data=None):
+    def __init__(self, spacedim: int=10, data=None):
 
         self._data=data    
         self._spacedim=spacedim
@@ -115,57 +25,57 @@ class mcmc:
             self._mu=np.random.randn(spacedim)
             #Make cov matrix
             sqrt_cov=np.random.randn(spacedim,spacedim)
+            self._cov=np.dot(sqrt_cov,sqrt_cov.T)
 
-
-        self._cov=np.dot(sqrt_cov,sqrt_cov.T)
         self._acceptedsteps=[]
         self._numberaccepted=0
         self._acceptedllhs=[]
         self._stepmatrix=[]
         self._nsteps=0
+        self._total_steps=0
         self._local_state=np.random.RandomState(None)
 
-    def getData(self):
+    def getData(self)->pd.DataFrame():
         return self._data
 
-    def updateInputData(self,updated_data):
-        self.__init__(self._spacedim,updated_data)
-        return 1
-
-    def getMeanVal(self):
+    def getMeanVal(self)->float:
         return self._mu
 
-    def updateMeanVal(self,update_mu):
+    def updateMeanVal(self,update_mu: float)->float:
         self._mu=update_mu
-        return 1
+        return 0
     
     def getCov(self):
         return self._cov
     
-    def updateCov(self,updated_cov):
+    def updateCov(self,updated_cov)->None:
         self._cov=updated_cov
-        return 1
 
-    def getSpaceDim(self):
+    def getSpaceDim(self)->int:
         return self._spacedim
 
-    def updateSpaceDim(self,updated_dim):
+    def updateSpaceDim(self,updated_dim: int)->None:
         self._spacedim=updated_dim
-        return 1
 
-    def getAcceptedSteps(self):
+    def getAcceptedSteps(self)->list:
         return self._acceptedsteps
 
     def getStepMatrix(self):
         return self._stepmatrix
 
-    def getAcceptedLLHS(self):
+    def getAcceptedLLHS(self)->list:
         return self._acceptedllhs
 
     def getNSteps(self):
         return self._nsteps
+    
+    def getAcceptanceRate(self):
+        if self._total_steps:
+            return self._numberaccepted/self._total_steps
+        else:
+            return 0
 
-    def loglikelihood(self,x):
+    def loglikelihood(self, x: list)->float:
         '''
 
         Parameters
@@ -183,7 +93,7 @@ class mcmc:
         else:
             return -1e6
     
-    def acceptFunc(self, curr_step, prop_step):
+    def acceptFunc(self, curr_step: list, prop_step: list)->bool:
         alpha=self._local_state.uniform(0,1)
         fact=min(1,np.exp(prop_step-curr_step))
         if alpha<fact:
@@ -191,11 +101,41 @@ class mcmc:
         else:
             return False
         
-    def proposeStep(self,curr_step):
+    def proposeStep(self,curr_step: list)->list:
         prop_step = curr_step + np.dot(self._stepmatrix, self._local_state.randn(len(curr_step)))
         return prop_step
+
+    def autocorrs(self,totlag: int=1000)->list:
+        print("Making Autocorrelations")
+        if "daemon" not in mp.current_process()._config:
+            a_pool=mp.Pool()
+            autocorrarr=a_pool.map(self.autocalc, range(totlag))
+        else:
+            autocorrarr=np.empty((totlag, self._spacedim))
+            for k in range(totlag):
+                autocorrarr[k]=self.autocalc(k)
+        return autocorrarr
+   
+    def autocalc(self, k: int)->float:
+        parammeans=self._acceptedsteps.mean(0)
+        
+        num_k=np.zeros(self._spacedim)
+        denom_k=np.zeros(self._spacedim)
+        
     
-    def __call__(self, startpos, stepsize=None, nsteps=10000):
+        for i in range(self._nsteps):
+            #((x_i-xbar)
+            x_i = self._acceptedsteps[i]-parammeans
+            x_i2=x_i**2
+            
+            if i<self._nsteps-k:
+                x_ik=self._acceptedsteps[i+k]-parammeans
+                num_k+=x_ik*x_i
+                
+            denom_k+=x_i2
+        return num_k/denom_k
+    
+    def __call__(self, startpos: list, stepsize: int=None, nsteps: int=10000)->None:
         
         self._nsteps=nsteps
         
@@ -214,9 +154,8 @@ class mcmc:
         self._acceptedsteps[0]=curr_step
         self._acceptedllhs[0]=curr_llh
         
-        stepcount=1
-        self._numberaccepted=1
-        while stepcount<nsteps:
+
+        while self._total_steps<nsteps:
             # if stepcount%np.floor(nsteps/10)==0:
             #     print(f"Completed {stepcount}/{nsteps} steps, accepted {self._numberaccepted}")
             
@@ -228,143 +167,151 @@ class mcmc:
                 curr_llh=prop_llh
                 self._numberaccepted+=1
 
-            self._acceptedsteps[stepcount]=curr_step
-            self._acceptedllhs[stepcount]=curr_llh
+            self._acceptedsteps[self._total_steps]=curr_step
+            self._acceptedllhs[self._total_steps]=curr_llh
             
+            self._total_steps+=1
+        return self._acceptedsteps, self._numberaccepted/self._total_steps
 
-
-            stepcount+=1
-        return self._acceptedsteps, self._acceptedllhs
-    
-    def autocorrs(self,totlag=1000):
-        print("Making Autocorrelations")
-        if "daemon" not in mp.current_process()._config:
-            a_pool=mp.Pool()
-            autocorrarr=a_pool.map(self.autocalc, range(totlag))
+######################################
+class multi_mcmc():
+    def __init__(self, nchains: int=100, spacedim: int=10, nsteps: int=10000, data=None)->None:
+        self._nchains=nchains
+        self._spacedim=spacedim
+        self._nsteps=nsteps
+        if data is None: #We'll just use a fake data set here
+            mu=np.random.randn(spacedim)
+            #Make cov matrix
+            sqrt_cov=np.random.randn(spacedim,spacedim)
+            cov=np.dot(sqrt_cov,sqrt_cov.T)
+            self._data=[mu,cov]
         else:
-            autocorrarr=np.empty((totlag, self._spacedim))
-            for k in range(totlag):
-                autocorrarr[k]=self.autocalc(k)
-        return autocorrarr
-   
-    def autocalc(self, k):
-        parammeans=self._acceptedsteps.mean(0)
-        
-        num_k=np.zeros(self._spacedim)
-        denom_k=np.zeros(self._spacedim)
-        
-    
-        for i in range(self._nsteps):
-            #((x_i-xbar)
-            x_i = self._acceptedsteps[i]-parammeans
-            x_i2=x_i**2
-            
-            if i<self._nsteps-k:
-                x_ik=self._acceptedsteps[i+k]-parammeans
-                num_k+=x_ik*x_i
-                
-            denom_k+=x_i2
-        return num_k/denom_k
-        
-class mcmc_training_gen(process_data):
-    def __init__(self,trainsize=10, mcmcdim=10, mcmcsteps=10000, autocorrlag=1000, mcmc_stepsizes=None):
-        process_data.__init__(self)
-        self._trainsize=trainsize #amount of training data we want
-        self._mcmcdim=mcmcdim #mcmc dimension
-        self._mcmcsteps=mcmcsteps #mcmc steps to run
-        self._autocorrlag=autocorrlag #lag on autocorrelations
-        self._mcmc_stepsizes=mcmc_stepsizes
-        self._appenddata=False #Append to previous array when running
-        self._trainarr=[]
-        
-        self._processed_data=pd.DataFrame()     
+            self._data=data
 
-    def getMCMCStepSizes(self):
-        return self._mcmc_stepsizes
-    
-    def updateMCMCStepSizes(self,updated_vals):
-        self._mcmc_stepsizes=updated_vals
-        return 1
+        self._paramarr=np.empty(nchains, object)
+        for i in range(nchains):
+            pdict={'stepsizes' : np.random.rand(self._spacedim),
+                   'startpos'  : np.random.rand(self._spacedim)}
+            self._paramarr[i]=pdict
+        self._acceptanceratearr=None
 
-    def getMCMCDim(self):
-        return self._mcmcdim
-    
-    def updateMCMCDim(self,updated_mcmcdimval):
-        self._mcmcdim=updated_mcmcdimval
-        return 1
-    
-    def getMCMCSteps(self):
-        return self._mcmcsteps
+    def getAcceptanceRate(self)->float:
+        return self._acceptancerate
 
-    def updateMCMCSteps(self,updated_mcmcstepsval):
-        self._mcmcsteps=updated_mcmcstepsval
-        return 1
-    
-    def updateAutoCorrLag(self, updated_lagval):
-        self._autocorrlag=updated_lagval
-        return 1
-    
-    def getAutoCorrLag(self):
-        return self._autocorrlag
+    def getStepSizes(self)->np.array:
+        step_arr=np.array([self._paramarr[i]['stepsizes'] for i in range(self._nchains)])
+        return step_arr
 
-    def updateTrainSize(self,updateval):
-        self._trainsize=updateval
-        return 1
+    def runmcmc(self, i:int)->int:
+            stepsizes=self._paramarr[i]['stepsizes']
+            startpos=self._paramarr[i]['startpos']
+            mcmc_=mcmc(self._spacedim,data=self._data)
+            _, acceptancerate=mcmc_(startpos, stepsizes, self._nsteps)
+            return acceptancerate
 
-
-    def updateTrainData(self, update_arr):
-        #Updates the array of training data
-        #can either append values or overwrite
-        if self._appenddata:
-            self.updateTrainSize(self._trainsize+len(update_arr))
-            self._trainarr.append(update_arr)
-        else:
-            self._trainarr=update_arr
-        return 1
-
-    def getTrainData(self):
-        return self._trainarr
-
-    def createTrain(self, i):
-        #generate mcmc instance
-        #i just a placeholder!
-        mc=mcmc(self._mcmcdim)
-        mc_acc, mc_llh=mc(np.random.randn(self._mcmcdim),nsteps=self._mcmcsteps,stepsize=self._mcmc_stepsizes)
-        mcauto=mc.autocorrs(self._autocorrlag)
-        return [mc_acc, mc_llh, mcauto]
-    
-    def generateTrainingData(self):
+    def runMCMC(self)->list:
         b_pool=mp.Pool()
-        train_arr=b_pool.map(self.createTrain, range(self._trainsize))
+        acceptarr=b_pool.map(self.runmcmc, range(self._nchains))
         # train_arr=[]
         # for i in range(self.trainsize):
         #     train_arr.append(self.createTrain(i))
-        self.updateTrainData(train_arr)
-        return train_arr
+        self._acceptanceratearr=acceptarr
+        return acceptarr
 
-    def __call__(self, llhbins=20, autocorr_integral_split=20, autocorr_reduce_size=50,append_data=False):
-        #llhbins = number of llh bins
-        #autocorr_integral_split=number of bins to split autocorr data into before integration
-        #autocorr_reduce_size= how much to reduce autocorrelation by
-        #append_data -> append data?
-        self.generateTrainingData()
-        #Set inputs for processing training data!
-        self.setInputParams(self.getTrainData(), llhbins, autocorr_integral_split, autocorr_reduce_size)
-        self.processTrainData(llhbins, autocorr_integral_split, autocorr_reduce_size, append_data)
-        print("Processed data set has been created!")
+    def saveToFile(self, output: str)->None:
+        #Let's make everything a nice dictionary first
+        data={}
+        data['Acceptance_Rate']=self._acceptanceratearr
+        #This is grim, sorry!
+        for j in range(self._spacedim):
+            step_arr=[step['stepsizes'][j] for step in self._paramarr]
+            data[f'Step_{j}']=step_arr
+
+        dftosave=pd.DataFrame(data)
+        dftosave.to_csv(output)
+        print(f"Saved to {output}")
+
+    def __call__(self, output: str)->None:
+        print(f"Running {self._nchains} chains for {self._nsteps} steps with dimension {self._spacedim}")
+        self.runMCMC()
+        print(f"MCMC has been run, saving to {output}")
+        self.saveToFile(output)
+
+
+######################################
+
+class classifier():
+    def __init__(self, data_file: str, optimise_par_names: list, hyperparams: dict=None)->None:
+        #Add way to generate good+bad dataframes here!
+        '''
+        data_file : points to file address for data stored in csv/other format
+        optimise_par_names: list of names of parameter(s) you want to optimise, should be list of strings
+        hyperparams: all the hyper params you could want!
+        '''
+        if not isinstance(optimise_par_names, list):
+            raise TypeError(f"{optimise_par_names} is not a list, please provide as list")
+
+        if not isinstance(data_file, str):
+            raise TypeError(f"{data_file} is not a string, please give me a string")
         
-    def saveToCSV(self,outputname):
-        outputdata=self.getProcessedData()
-        outputdata.to_csv(f"{outputname}.csv")
-        print(f"Saved data to {outputname}.csv")
+        if not(isinstance(hyperparams, dict) or hyperparams is None):
+            raise TypeError(f"{hyperparams} is not a dict, gimme a dict")
 
-    #Here's the idea:
-        # Generate step size
-        # 1 run standard NN training 
-        # Whoever win the NN decides the step size
-        # Need way to shrink variance of each step in a smart way
+        self._hyperparams=hyperparams
+
+        fulldata=pd.read_csv(data_file)
+        
+        try:
+            self._labeldf=fulldata.loc(optimise_par_names)
+        except ValueError:
+            print(f"{optimise_par_names} is not in {data_file}")
+        except:
+            print(f"Sorry, something's gone wrong with your labels")
+
+        self._data_df=fulldata.drop(optimise_par_names, axis=1)
+        if len(self._data_df)==0:
+            raise ValueError("Test data must have length > 0")
+
+        self._model = Sequential()
+        self.setupBasicClassifier()
+
+
+    def getLabels(self)->list:
+        return self._labels
+
+    def getDataDataFrame(self):
+        return self._data_df
+
+    def getLabelDataFrame(self):
+        return self._labeldf
+
+    def getClassifier(self):
+        return self._model
+
+    def getModel(self):
+        return self._model
+
+    def setupBasicClassifier(self):
+        #This is where the classifier lives, obviously this can be tuned. Need to make more customisable!
+        self._model.add(Dense(12, input_dim=8, activation='relu'))
+        self._model.add(Dense(8, activation='relu'))
+        self._model.add(Dense(1, activation='sigmoid'))
+
+    def __call__(self):
+        self._model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+        self._model.fit(self._data_df, self._labeldf, epochs=150, batch_size=10)
+        _, accuracy = self._model.evaluate(self._data_df, self._labeldf)
+        print(f"accuracy is {accuracy}")
+
+
+
+#################THIS IS TEMPORARY!####################
+#This is where the classifier is going to live for now, obviously can be made more modular later I'm just lazy!
+
 if __name__== "__main__":
-    traindata=mcmc_training_gen(20,autocorrlag=200)
-    traindata()
-    traindata.saveToCSV("testout")
-    traindf=traindata.getProcessedData()
+    #Run a load of MCMC
+    mc_runner=multi_mcmc()
+    mc_runner('test.csv')
+
+    cfier=classifier('test.csv', ['Acceptance_Rate'])
+    cfier()
