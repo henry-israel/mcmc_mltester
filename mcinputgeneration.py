@@ -221,15 +221,15 @@ class multi_mcmc():
         step_arr=np.array([self._paramarr[i]['stepsizes'] for i in range(self._nchains)])
         return step_arr
 
-    def runmcmc(self, i:int)->int:
+    def runMCMC(self, i:int)->int:
             stepsizes=self._paramarr[i]['stepsizes']
             startpos=self._paramarr[i]['startpos']
             mcmc_=mcmc(self._spacedim,data=self._data)
             _, acceptancerate=mcmc_(startpos, stepsizes, self._nsteps)
             return acceptancerate
 
-    def runMCMC(self)->list:
-        acceptarr=process_map(self.runmcmc, range(self._nchains), chunksize=self._chunksize)
+    def runMCMC_MultiProc(self)->list:
+        acceptarr=process_map(self.runMCMC, range(self._nchains), chunksize=self._chunksize)
         # train_arr=[]
         # for i in range(self.trainsize):
         #     train_arr.append(self.createTrain(i))
@@ -264,7 +264,7 @@ class multi_mcmc():
 
     def __call__(self, output: str)->None:
         print(f"Running {self._nchains} chains for {self._nsteps} steps with dimension {self._spacedim}")
-        self.runMCMC()
+        self.runMCMC_MultiProc()
         print(f"MCMC has been run, saving to {output}")
         self.saveToFile(output)
 
