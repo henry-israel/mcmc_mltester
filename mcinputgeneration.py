@@ -2,10 +2,12 @@ import numpy as np
 import scipy.stats
 import pandas as pd
 from matplotlib import pyplot as plt
+from matplotlib.backends import backend_pdf
 import multiprocessing as mp
-from keras.models import Sequential
+from keras.models import Sequential, load_model
 from keras.layers import Dense, Normalization, Conv1D, MaxPooling1D, Dropout
-#from numba import config, njit, threading_layer
+from numba.experimental import jitclass
+import numba as nb
 import tensorflow as tf
 from tqdm.contrib.concurrent import process_map
 
@@ -13,11 +15,8 @@ from tqdm.contrib.concurrent import process_map
 
 class mcmc:
     def __init__(self, spacedim: int=10, data=None):
-
-        self._data=data    
+  
         self._spacedim=spacedim
-
-
         if data is not None:
             self._mu=data[0]
             self._cov=data[1]
@@ -37,46 +36,53 @@ class mcmc:
         self._total_steps=0
         self._local_state=np.random.RandomState(None)
 
-    def getData(self)->pd.DataFrame():
-        return self._data
-
-    def getMeanVal(self)->float:
+    @property
+    def mu(self)->float:
         return self._mu
-
-    def updateMeanVal(self,update_mu: float)->float:
-        self._mu=update_mu
-        return 0
     
-    def getCov(self):
+    @mu.setter
+    def mu(self,update_mu: float)->None:
+        self._mu=update_mu
+    
+    @property
+    def cov(self):
         return self._cov
     
-    def updateCov(self,updated_cov)->None:
+    @cov.setter
+    def cov(self,updated_cov)->None:
         self._cov=updated_cov
 
-    def getSpaceDim(self)->int:
+    @property
+    def spacedim(self)->int:
         return self._spacedim
 
-    def updateSpaceDim(self,updated_dim: int)->None:
+    @spacedim.setter
+    def spacedim(self,updated_dim: int)->None:
         self._spacedim=updated_dim
 
-    def getAcceptedSteps(self)->list:
+    @property
+    def accepted_steps(self)->list:
         return self._acceptedsteps
 
-    def getStepMatrix(self):
+    @property
+    def step_matrix(self):
         return self._stepmatrix
 
-    def getAcceptedLLHS(self)->list:
+    @property
+    def accepted_llhs(self)->list:
         return self._acceptedllhs
 
-    def getNSteps(self):
+    @property
+    def n_steps(self):
         return self._nsteps
-    
-    def getAcceptanceRate(self):
+    @property
+    def acceptance_rate(self):
         if self._total_steps:
             return self._numberaccepted/self._total_steps
         else:
             return 0
 
+    
     def loglikelihood(self, x: list)->float:
         '''
 
@@ -102,11 +108,13 @@ class mcmc:
             return True
         else:
             return False
-        
+
+       
     def proposeStep(self,curr_step: list)->list:
         prop_step = curr_step + np.dot(self._stepmatrix, self._local_state.randn(len(curr_step)))
         return prop_step
 
+    
     def autocorrs(self,totlag: int=1000)->list:
         print("Making Autocorrelations")
         if "daemon" not in mp.current_process()._config:
@@ -118,6 +126,7 @@ class mcmc:
                 autocorrarr[k]=self.autocalc(k)
         return autocorrarr
    
+    
     def autocalc(self, k: int)->float:
         parammeans=self._acceptedsteps.mean(0)
         
@@ -137,6 +146,7 @@ class mcmc:
             denom_k+=x_i2
         return num_k/denom_k
     
+
     def __call__(self, startpos: list, stepsize: int=None, nsteps: int=10000)->None:
         
         self._nsteps=nsteps
@@ -197,15 +207,17 @@ class multi_mcmc():
 
         self._paramarr=np.empty(nchains, object)
         for i in range(nchains):
-            pdict={'stepsizes' : np.random.rand(self._spacedim),
+            pdict={'stepsizes' : np.random.rand(self._spacedim)/np.random.randint(1,10,size=self._spacedim),
                    'startpos'  : np.random.rand(self._spacedim)}
             self._paramarr[i]=pdict
         self._acceptanceratearr=None
 
-    def getAcceptanceRate(self)->float:
+    @property
+    def acceptance_rate(self)->float:
         return self._acceptancerate
 
-    def getStepSizes(self)->np.array:
+    @property
+    def step_arr(self)->np.array:
         step_arr=np.array([self._paramarr[i]['stepsizes'] for i in range(self._nchains)])
         return step_arr
 
@@ -237,6 +249,19 @@ class multi_mcmc():
         dftosave.to_csv(output, index=False)
         print(f"Saved to {output}")
 
+    def saveModel(self, output: str ="model_data")->None:
+        print(f"mean used is : {self._data[0]}, saving to {output}_mean.csv")
+        np.savetxt(f"{output}_mean.csv",self._data[1],delimiter=',')
+        print(f"saving covariance matrix to {output}_cov.csv")
+        np.savetxt(f"{output}_cov.csv",self._data[1],delimiter=',')
+        print('saved')
+    
+    def accessPreviousModel(self, meanfile: str="model_data_mean.csv", covmatrixfile: str="model_data_cov.csv"):
+        print("Using covariance matrix and mean from previous run")
+        meanval=np.loadtxt(meanfile, delimiter=',')
+        cov=np.loadtxt(covmatrixfile, delimiter=',')
+        self._data=[meanval, cov]
+
     def __call__(self, output: str)->None:
         print(f"Running {self._nchains} chains for {self._nsteps} steps with dimension {self._spacedim}")
         self.runMCMC()
@@ -266,7 +291,6 @@ class classifier():
         self._hyperparams=hyperparams
 
         fulldata=pd.read_csv(data_file)
-        print(fulldata)
         try:
             self._labeldf=fulldata[optimise_par_names]
         except ValueError:
@@ -275,50 +299,108 @@ class classifier():
             raise Exception(f"Sorry, something's gone wrong with your labels")
 
         data_df=fulldata.drop(optimise_par_names, axis=1)
-        self._inputsize=len(data_df)
-        if self._inputsize==0:
-            raise ValueError("Test data must have length > 0")
+        self._nentries=len(data_df)
+        self._ndim=len(data_df.columns)
+        if self._ndim==0:
+            raise ValueError("Test data must have at least one category > 0")
         self._data_tensor=tf.convert_to_tensor(data_df)
-        self._data_tensor=tf.reshape(self._data_tensor, (100,10))
-        print(self._data_tensor)
+        self._data_tensor=tf.reshape(self._data_tensor, (self._nentries,self._ndim))
 
         normaliser = Normalization(axis=-1)
         normaliser.adapt(self._data_tensor)
         self._model = Sequential([normaliser])
         self.setupNeuralNet()
 
-
-    def getLabels(self)->list:
+    @property
+    def labels(self)->list:
         return self._labels
 
-    def getDataTensor(self):
+    @property
+    def data_tensor(self):
         return self._data_tensor
 
-    def getLabelDataFrame(self)->pd.DataFrame:
+    @property
+    def label_data_frame(self)->pd.DataFrame:
         return self._labeldf
 
-    def getClassifier(self):
-        return self._model
-
-    def getModel(self):
+    @property
+    def model(self):
         return self._model
 
     def setupNeuralNet(self)->None:
-        #HARDCODED BAD DON'T DO THIS!
         #This is where the classifier lives, obviously this can be tuned. Need to make more customisable!
-        self._model.add(Conv1D(32, 3, input_shape=(10, 100), activation='relu')) #Let's be spicy and add a conv alyer
-        self._model.add(MaxPooling1D(3))
+        self._model.add(Dense(30, input_dim=(self._nentries, self._ndim), activation='relu'))
         self._model.add(Dropout(0.2))
-        self._model.add(Dense(8, activation='relu'))
+        self._model.add(Dense(20, activation='relu'))
+        self._model.add(Dense(10, activation='relu'))
         self._model.add(Dense(1, activation='sigmoid'))
 
-        self._model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+        #Compile the boi
+        self._model.compile(loss='mse',  optimizer=tf.optimizers.Adam(learning_rate=0.1))
 
-    def __call__(self):
+
+    def __call__(self, output: str="modeloutput")->None:
  
         self._model.fit(self._data_tensor, self._labeldf, epochs=150, batch_size=100)
-        _, accuracy = self._model.evaluate(self._data_tensor, self._labeldf)
-        print(f"accuracy is {accuracy}")
+        print(self._model.evaluate(self._data_tensor, self._labeldf))
+        print(f"saving to {output}")
+        self._model.save(output)
+
+class model_analyser:
+    #Analytics kit for NN
+    def __init__(self, model_file: str, test_data_file: str, optimise_par_names: list=['Acceptance_Rate'])->None:
+        print(f"Testing model from {model_file} on test_data_file")
+        self._model=load_model(model_file)
+        self._dataset=pd.read_csv(test_data_file)
+        
+        try:
+            self._truevals=self._dataset[optimise_par_names]
+        except ValueError:
+            print(f"{optimise_par_names} is not in testing data")
+        except:
+            raise Exception(f"Sorry, something's gone wrong with your labels")
+      
+        data_df=self._dataset.drop(optimise_par_names, axis=1)
+        nentries=len(data_df)
+        ndim=len(data_df.columns)
+        if ndim==0:
+            raise ValueError("Test data must have at least one category > 0")
+        self._data_tensor=tf.convert_to_tensor(data_df)
+        self._data_tensor=tf.reshape(self._data_tensor, (nentries,ndim))
+
+        print("Calculating predicted values")
+        self._predictvals=self._model.predict(self._data_tensor)
+
+    def truePredPlot(self, label: str=None)->plt.figure():
+        fig=plt.figure()
+        fig.plot(self._truevals, self._predictvals)
+        fig.xlabel(f"True Values {' : '+label if label is not None else ''}")
+        fig.ylabel(f"Predicted Values {' : '+label if label is not None else ''}")
+        return fig
+
+    def percentDiffPlot(self, label: str=None)->plt.figure():
+        fig=plt.figure()
+        truearr=self._truevals.to_numpy()
+        predarr=np.array(self._predictvals)
+        perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
+        fig.hist(perdiff, bins=20)
+        fig.xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
+        return fig
+
+    def __call__(self, outfile: str = "diagnostics.pdf", label: str=''):
+        #Call here will run through all the diagnostic plots
+        print("doing plots")
+        pdf=backend_pdf.PdfPages(outfile)
+        truepred_fig=self.truePredPlot(label=label)
+        pdf.savefig(truepred_fig)
+
+        perdiff_fig=self.percentDiffPlot(label=label)
+        pdf.savefig(perdiff_fig)
+
+        pdf.close()
+        print(f"Save figures to {outfile}")
+
+
 
 
 
@@ -327,8 +409,8 @@ class classifier():
 
 if __name__== "__main__":
     #Run a load of MCMC
-    mc_runner=multi_mcmc(nchains=100, spacedim=100, nsteps=1000)
-    mc_runner('test.csv')
-
-    # cfier=classifier('test.csv', ['Acceptance_Rate'])
-    # cfier()
+    mc_runner=multi_mcmc(nchains=2000, spacedim=30, nsteps=10000)
+    mc_runner('train_set.csv')
+    mc_runner.saveModel()
+    cfier=classifier('test_set.csv', ['Acceptance_Rate'])
+    cfier()
