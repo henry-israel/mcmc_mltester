@@ -207,7 +207,7 @@ class multi_mcmc():
 
         self._paramarr=np.empty(nchains, object)
         for i in range(nchains):
-            pdict={'stepsizes' : np.random.rand(self._spacedim)/np.random.randint(1,10,size=self._spacedim),
+            pdict={'stepsizes' : np.random.normal(loc=0, scale=1, size=self._spacedim),
                    'startpos'  : np.random.rand(self._spacedim)}
             self._paramarr[i]=pdict
         self._acceptanceratearr=None
