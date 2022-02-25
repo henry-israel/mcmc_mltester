@@ -251,12 +251,12 @@ class multi_mcmc():
 
     def saveModel(self, output: str ="model_data")->None:
         print(f"mean used is : {self._data[0]}, saving to {output}_mean.csv")
-        np.savetxt(f"{output}_mean.csv",self._data[1],delimiter=',')
+        np.savetxt(f"{output}_mean.csv",self._data[0],delimiter=',')
         print(f"saving covariance matrix to {output}_cov.csv")
         np.savetxt(f"{output}_cov.csv",self._data[1],delimiter=',')
         print('saved')
     
-    def accessPreviousModel(self, meanfile: str="model_data_mean.csv", covmatrixfile: str="model_data_cov.csv"):
+    def usePreviousModel(self, meanfile: str="model_data_mean.csv", covmatrixfile: str="model_data_cov.csv"):
         print("Using covariance matrix and mean from previous run")
         meanval=np.loadtxt(meanfile, delimiter=',')
         cov=np.loadtxt(covmatrixfile, delimiter=',')
@@ -336,12 +336,12 @@ class classifier():
         self._model.add(Dense(1, activation='sigmoid'))
 
         #Compile the boi
-        self._model.compile(loss='mse',  optimizer=tf.optimizers.Adam(learning_rate=0.1))
+        self._model.compile(loss='mse',  optimizer='Adam')
 
 
     def __call__(self, output: str="modeloutput")->None:
  
-        self._model.fit(self._data_tensor, self._labeldf, epochs=150, batch_size=100)
+        self._model.fit(self._data_tensor, self._labeldf, epochs=1500, batch_size=100, use_multiprocessing=True, steps_per_epoch=100)
         print(self._model.evaluate(self._data_tensor, self._labeldf))
         print(f"saving to {output}")
         self._model.save(output)
@@ -369,32 +369,37 @@ class model_analyser:
         self._data_tensor=tf.reshape(self._data_tensor, (nentries,ndim))
 
         print("Calculating predicted values")
-        self._predictvals=self._model.predict(self._data_tensor)
+        self._predictvals=[p[0] for p in self._model.predict(self._data_tensor)]
+        print(self._predictvals)
 
     def truePredPlot(self, label: str=None)->plt.figure():
         fig=plt.figure()
-        fig.plot(self._truevals, self._predictvals)
-        fig.xlabel(f"True Values {' : '+label if label is not None else ''}")
-        fig.ylabel(f"Predicted Values {' : '+label if label is not None else ''}")
-        return fig
+        ax=fig.add_subplot(1,1,1)
+        truearr=np.array(self._truevals.to_numpy())
+        print(len(truearr)-len(self._predictvals))
+        ax.plot(truearr, self._predictvals,'.')
+        ax.set_xlabel(f"True Values {' : '+label if label is not None else ''}")
+        ax.set_ylabel(f"Predicted Values {' : '+label if label is not None else ''}")
+        return fig,ax
 
     def percentDiffPlot(self, label: str=None)->plt.figure():
         fig=plt.figure()
-        truearr=self._truevals.to_numpy()
+        ax=fig.add_subplot(1,1,1)
+        truearr=np.array(self._truevals.to_numpy())
         predarr=np.array(self._predictvals)
         perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
-        fig.hist(perdiff, bins=20)
-        fig.xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
-        return fig
+        ax.hist(perdiff, bins=20)
+        ax.set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
+        return fig,ax
 
     def __call__(self, outfile: str = "diagnostics.pdf", label: str=''):
         #Call here will run through all the diagnostic plots
         print("doing plots")
         pdf=backend_pdf.PdfPages(outfile)
-        truepred_fig=self.truePredPlot(label=label)
+        truepred_fig, truepred_ax=self.truePredPlot(label=label)
         pdf.savefig(truepred_fig)
 
-        perdiff_fig=self.percentDiffPlot(label=label)
+        perdiff_fig, perdif_ax=self.percentDiffPlot(label=label)
         pdf.savefig(perdiff_fig)
 
         pdf.close()
@@ -412,5 +417,15 @@ if __name__== "__main__":
     mc_runner=multi_mcmc(nchains=2000, spacedim=30, nsteps=10000)
     mc_runner('train_set.csv')
     mc_runner.saveModel()
-    cfier=classifier('test_set.csv', ['Acceptance_Rate'])
-    cfier()
+    #Classifier
+    cfier=classifier('train_set.csv', ['Acceptance_Rate'])
+    cfier('model_2Kchains_dim39_10KStep')
+   
+    mc_test_runner=multi_mcmc(nchains=100, spacedim=30, nsteps=10000)
+    mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    mc_test_runner('test_set.csv')
+    
+
+    #Let's grab our diagnostics
+    mod_ana=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
+    mod_ana('diagnostics.pdf', label='Acceptance Rate')
