@@ -14,7 +14,7 @@ from tqdm.contrib.concurrent import process_map
 ######################################
 
 class mcmc:
-    def __init__(self, spacedim: int=10, data=None):
+    def __init__(self, spacedim: int=10, data=None, debug=False):
   
         self._spacedim=spacedim
         if data is not None:
@@ -35,6 +35,7 @@ class mcmc:
         self._nsteps=0
         self._total_steps=0
         self._local_state=np.random.RandomState(None)
+        self._debug=debug
 
     @property
     def mu(self)->float:
@@ -84,18 +85,6 @@ class mcmc:
 
     
     def loglikelihood(self, x: list)->float:
-        '''
-
-        Parameters
-        ----------
-        x : Proposed point
-
-        Returns
-        -------
-        TYPE
-            Does LLH calc for this boi
-
-        '''
         if np.all(x < 50) and np.all(x > -50):
             return scipy.stats.multivariate_normal(mean=self._mu, cov=self._cov).logpdf(x)
         else:
@@ -111,6 +100,8 @@ class mcmc:
 
        
     def proposeStep(self,curr_step: list)->list:
+        if self._debug:
+            print(f"proposing step : {self._total_steps}")
         prop_step = curr_step + np.dot(self._stepmatrix, self._local_state.randn(len(curr_step)))
         return prop_step
 
@@ -187,7 +178,7 @@ class mcmc:
 
 ######################################
 class multi_mcmc():
-    def __init__(self, nchains: int=100, spacedim: int=10, nsteps: int=10000, data=None)->None:
+    def __init__(self, nchains: int=100, spacedim: int=10, nsteps: int=10000, data=None, debug=False)->None:
         self._nchains=nchains
         self._spacedim=spacedim
         self._nsteps=nsteps
@@ -199,18 +190,21 @@ class multi_mcmc():
             self._data=[mu,cov]
         else:
             self._data=data
-        pool_size = mp.cpu_count()
-        self._chunksize, extra = divmod(self._nchains, pool_size* 4)
+        self._pool_size = mp.cpu_count()
+        print(f"Using {self._pool_size} CPUs")
+        self._chunksize, extra = divmod(self._nchains, self._pool_size* 4)
         if extra:
             self._chunksize+=1
 
 
         self._paramarr=np.empty(nchains, object)
         for i in range(nchains):
-            pdict={'stepsizes' : np.random.normal(loc=0, scale=1, size=self._spacedim),
+            pdict={'stepsizes' : np.random.uniform(low=0, high=0.50, size=self._spacedim),
                    'startpos'  : np.random.rand(self._spacedim)}
             self._paramarr[i]=pdict
         self._acceptanceratearr=None
+        
+        self._debug=debug
 
     @property
     def acceptance_rate(self)->float:
@@ -224,16 +218,20 @@ class multi_mcmc():
     def runMCMC(self, i:int)->int:
             stepsizes=self._paramarr[i]['stepsizes']
             startpos=self._paramarr[i]['startpos']
-            mcmc_=mcmc(self._spacedim,data=self._data)
+            mcmc_=mcmc(self._spacedim,data=self._data, debug=self._debug)
             _, acceptancerate=mcmc_(startpos, stepsizes, self._nsteps)
             return acceptancerate
 
     def runMCMC_MultiProc(self)->list:
-        acceptarr=process_map(self.runMCMC, range(self._nchains), chunksize=self._chunksize)
-        # train_arr=[]
-        # for i in range(self.trainsize):
-        #     train_arr.append(self.createTrain(i))
+        if not self._debug:
+           acceptarr=process_map(self.runMCMC, range(self._nchains))#, max_workers=self._pool_size, chunksize=self._chunksize)
+        else:
+            acceptarr=np.empty(self._nchains, object)
+            for i in range(self._nchains):
+                acceptarr[i]=self.runMCMC(i)
+      
         self._acceptanceratearr=acceptarr
+        print(f"acceptance rates: {acceptarr}")
         return acceptarr
 
     def saveToFile(self, output: str)->None:
@@ -353,6 +351,7 @@ class model_analyser:
         self._model=load_model(model_file)
         self._dataset=pd.read_csv(test_data_file)
         
+
         try:
             self._truevals=self._dataset[optimise_par_names]
         except ValueError:
@@ -370,62 +369,66 @@ class model_analyser:
 
         print("Calculating predicted values")
         self._predictvals=[p[0] for p in self._model.predict(self._data_tensor)]
-        print(self._predictvals)
+        self._truearr=np.array(self._truevals.to_numpy())
+        self._predarr=np.array(self._predictvals)
 
     def truePredPlot(self, label: str=None)->plt.figure():
         fig=plt.figure()
         ax=fig.add_subplot(1,1,1)
-        truearr=np.array(self._truevals.to_numpy())
-        print(len(truearr)-len(self._predictvals))
-        ax.plot(truearr, self._predictvals,'.')
+        truearr=self._truearr
+        predarr=self._predarr
+        print(len(truearr)-len(predarr))
+        ax.plot(truearr, predarr,'.')
         ax.set_xlabel(f"True Values {' : '+label if label is not None else ''}")
         ax.set_ylabel(f"Predicted Values {' : '+label if label is not None else ''}")
+        #Let's a line of best fit
+        grad, intercept = np.polyfit(truearr, predarr, 1)
+        lobfvals=np.linspace(min(truearr), max(truearr),num=len(truearr))
+        ax.plot(lobfvals, grad*lobfvals+intercept,'-',color='r')
+        print(f"line of best fit is prediction={grad}trueval+{intercept}")
         return fig,ax
 
     def percentDiffPlot(self, label: str=None)->plt.figure():
-        fig=plt.figure()
-        ax=fig.add_subplot(1,1,1)
-        truearr=np.array(self._truevals.to_numpy())
-        predarr=np.array(self._predictvals)
-        perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
-        ax.hist(perdiff, bins=20)
-        ax.set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
-        return fig,ax
+        truearr=self._truearr
+        predarr=self._predarr
+        print(truearr, predarr)
+        ndim=len((truearr[0]))
+        fig, axes = plt.subplots(nrows=ndim+ndim%2, ncols=2)
+        for i in range(ndim):
+            perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
+            axes[i].hist(perdiff, bins=20)
+            axes[i].set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
+        return fig,axes
 
     def __call__(self, outfile: str = "diagnostics.pdf", label: str=''):
         #Call here will run through all the diagnostic plots
         print("doing plots")
         pdf=backend_pdf.PdfPages(outfile)
-        truepred_fig, truepred_ax=self.truePredPlot(label=label)
+        truepred_fig, _=self.truePredPlot(label=label)
         pdf.savefig(truepred_fig)
 
-        perdiff_fig, perdif_ax=self.percentDiffPlot(label=label)
+        perdiff_fig, _=self.percentDiffPlot(label=label)
         pdf.savefig(perdiff_fig)
 
         pdf.close()
         print(f"Save figures to {outfile}")
 
 
-
-
-
-#################THIS IS TEMPORARY!####################
-#This is where the classifier is going to live for now, obviously can be made more modular later I'm just lazy!
-
 if __name__== "__main__":
-    #Run a load of MCMC
-    mc_runner=multi_mcmc(nchains=2000, spacedim=30, nsteps=10000)
+    # #Run a load of MCMC
+    mc_runner=multi_mcmc(nchains=2000, spacedim=30, nsteps=10000, debug=False)
     mc_runner('train_set.csv')
+   # mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+
     mc_runner.saveModel()
     #Classifier
     cfier=classifier('train_set.csv', ['Acceptance_Rate'])
     cfier('model_2Kchains_dim39_10KStep')
    
-    mc_test_runner=multi_mcmc(nchains=100, spacedim=30, nsteps=10000)
+    mc_test_runner=multi_mcmc(nchains=100, spacedim=60, nsteps=10000)
     mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
     mc_test_runner('test_set.csv')
-    
 
-    #Let's grab our diagnostics
-    mod_ana=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
-    mod_ana('diagnostics.pdf', label='Acceptance Rate')
+    # #Let's grab our diagnostics
+    # mod_ana=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
+    # mod_ana('diagnostics.pdf', label='Acceptance Rate')
