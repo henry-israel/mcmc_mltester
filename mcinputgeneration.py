@@ -6,27 +6,30 @@ from matplotlib.backends import backend_pdf
 import multiprocessing as mp
 from keras.models import Sequential, load_model
 from keras.layers import Dense, Normalization, Conv1D, MaxPooling1D, Dropout
-from numba.experimental import jitclass
-import numba as nb
 import tensorflow as tf
-from tqdm.contrib.concurrent import process_map
+import tqdm as tqdm
+
 
 ######################################
 
-class mcmc:
+class mcmc():
     def __init__(self, spacedim: int=10, data=None, debug=False):
   
         self._spacedim=spacedim
         if data is not None:
             self._mu=data[0]
             self._cov=data[1]
-            self._spacedim=len(self._mu)
+        
        
         else:
             self._mu=np.random.randn(spacedim)
             #Make cov matrix
             sqrt_cov=np.random.randn(spacedim,spacedim)
             self._cov=np.dot(sqrt_cov,sqrt_cov.T)
+            print("HELLO")
+
+        if self._spacedim!=len(self._mu):
+            raise ValueError("spatial dimension and mean must be the same length!")
 
         self._acceptedsteps=[]
         self._numberaccepted=0
@@ -92,7 +95,8 @@ class mcmc:
     
     def acceptFunc(self, curr_step: list, prop_step: list)->bool:
         alpha=self._local_state.uniform(0,1)
-        fact=min(1,np.exp(prop_step-curr_step))
+        diff=min(prop_step-curr_step, 500) #Prevents pesky run time overflows 
+        fact=min(1,np.exp(diff))
         if alpha<fact:
             return True
         else:
@@ -100,9 +104,8 @@ class mcmc:
 
        
     def proposeStep(self,curr_step: list)->list:
-        if self._debug:
-            print(f"proposing step : {self._total_steps}")
-        prop_step = curr_step + np.dot(self._stepmatrix, self._local_state.randn(len(curr_step)))
+        #This will slow everything down considerably :(
+        prop_step = curr_step + [self._stepsizes*self._local_state.randn(len(curr_step))]
         return prop_step
 
     
@@ -138,14 +141,18 @@ class mcmc:
         return num_k/denom_k
     
 
-    def __call__(self, startpos: list, stepsize: int=None, nsteps: int=10000)->None:
+    def __call__(self, startpos: list=None, stepsize: int=None, nsteps: int=10000)->None:
         
         self._nsteps=nsteps
         
         if stepsize is None:
-            stepsize=np.ones(self._spacedim)
+            stepsize=np.random.uniform(low=0, high=0.50, size=self._spacedim)
+        self._stepsizes=stepsize
         self._stepmatrix=np.diag(stepsize)
         
+        if startpos is None:
+            startpos=np.random.normal(loc=0, scale=1.0, size=self._spacedim)
+
         #setup mcmc
         curr_step=startpos
         curr_llh=self.loglikelihood(startpos)
@@ -158,11 +165,7 @@ class mcmc:
         self._acceptedllhs[0]=curr_llh
         
 
-        while self._total_steps<nsteps:
-            # if stepcount%np.floor(nsteps/10)==0:
-            #     print(f"Completed {stepcount}/{nsteps} steps, accepted {self._numberaccepted}")
-            
-            
+        for step in range(1,self._nsteps):
             prop_step=self.proposeStep(curr_step)
             prop_llh=self.loglikelihood(prop_step)
             if self.acceptFunc(curr_llh, prop_llh):
@@ -170,11 +173,12 @@ class mcmc:
                 curr_llh=prop_llh
                 self._numberaccepted+=1
 
-            self._acceptedsteps[self._total_steps]=curr_step
-            self._acceptedllhs[self._total_steps]=curr_llh
+            self._acceptedsteps[step]=curr_step
+            self._acceptedllhs[step]=curr_llh
+            self._total_steps=step
+
             
-            self._total_steps+=1
-        return self._acceptedsteps, self._numberaccepted/self._total_steps
+        return self._numberaccepted/self._total_steps
 
 ######################################
 class multi_mcmc():
@@ -192,18 +196,9 @@ class multi_mcmc():
             self._data=data
         self._pool_size = mp.cpu_count()
         print(f"Using {self._pool_size} CPUs")
-        self._chunksize, extra = divmod(self._nchains, self._pool_size* 4)
-        if extra:
-            self._chunksize+=1
-
-
-        self._paramarr=np.empty(nchains, object)
-        for i in range(nchains):
-            pdict={'stepsizes' : np.random.uniform(low=0, high=0.50, size=self._spacedim),
-                   'startpos'  : np.random.rand(self._spacedim)}
-            self._paramarr[i]=pdict
+        #self._chunk_size=np.floor(self._nchains/(self._pool_size* 4))
         self._acceptanceratearr=None
-        
+        self._stepsizes=np.random.normal(loc=0, scale=1.0, size=(self._nchains,self._spacedim))
         self._debug=debug
 
     @property
@@ -212,26 +207,31 @@ class multi_mcmc():
 
     @property
     def step_arr(self)->np.array:
-        step_arr=np.array([self._paramarr[i]['stepsizes'] for i in range(self._nchains)])
-        return step_arr
+        return self._stepsizes
 
     def runMCMC(self, i:int)->int:
-            stepsizes=self._paramarr[i]['stepsizes']
-            startpos=self._paramarr[i]['startpos']
             mcmc_=mcmc(self._spacedim,data=self._data, debug=self._debug)
-            _, acceptancerate=mcmc_(startpos, stepsizes, self._nsteps)
+            acceptancerate=mcmc_(stepsize=self._stepsizes[i],nsteps=self._nsteps)
             return acceptancerate
 
     def runMCMC_MultiProc(self)->list:
+        print("MCMC Progress : ")
         if not self._debug:
-           acceptarr=process_map(self.runMCMC, range(self._nchains))#, max_workers=self._pool_size, chunksize=self._chunksize)
+            acceptarr=[]
+            with mp.get_context("spawn").Pool(self._pool_size) as pool:
+                with tqdm.tqdm(total=self._nchains) as pbar:
+                    for a in pool.imap_unordered(self.runMCMC, range(self._nchains)):
+                        acceptarr.append(a)
+                        pbar.update(1)
+            pool.join()
+            pool.close()
+        #Non-Parallelized, for debugging (SLOW)
         else:
-            acceptarr=np.empty(self._nchains, object)
-            for i in range(self._nchains):
-                acceptarr[i]=self.runMCMC(i)
-      
+            acceptarr=[]
+            for j in range(self._nchains):
+                acceptarr.append(self.runMCMC(j))
+                print(f"completed {j}/{self._nchains}")
         self._acceptanceratearr=acceptarr
-        print(f"acceptance rates: {acceptarr}")
         return acceptarr
 
     def saveToFile(self, output: str)->None:
@@ -240,7 +240,7 @@ class multi_mcmc():
         data['Acceptance_Rate']=self._acceptanceratearr
         #This is grim, sorry!
         for j in range(self._spacedim):
-            step_arr=[step['stepsizes'][j] for step in self._paramarr]
+            step_arr=[step[j] for step in self._stepsizes]
             data[f'Step_{j}']=step_arr
 
         dftosave=pd.DataFrame(data)
@@ -339,7 +339,7 @@ class classifier():
 
     def __call__(self, output: str="modeloutput")->None:
  
-        self._model.fit(self._data_tensor, self._labeldf, epochs=1500, batch_size=100, use_multiprocessing=True, steps_per_epoch=100)
+        self._model.fit(self._data_tensor, self._labeldf, epochs=150, batch_size=100, use_multiprocessing=True, steps_per_epoch=100)
         print(self._model.evaluate(self._data_tensor, self._labeldf))
         print(f"saving to {output}")
         self._model.save(output)
@@ -369,7 +369,7 @@ class model_analyser:
 
         print("Calculating predicted values")
         self._predictvals=[p[0] for p in self._model.predict(self._data_tensor)]
-        self._truearr=np.array(self._truevals.to_numpy())
+        self._truearr=[i[0] for i in np.array(self._truevals.to_numpy())]
         self._predarr=np.array(self._predictvals)
 
     def truePredPlot(self, label: str=None)->plt.figure():
@@ -381,23 +381,23 @@ class model_analyser:
         ax.plot(truearr, predarr,'.')
         ax.set_xlabel(f"True Values {' : '+label if label is not None else ''}")
         ax.set_ylabel(f"Predicted Values {' : '+label if label is not None else ''}")
-        #Let's a line of best fit
+
+        #LOBF
         grad, intercept = np.polyfit(truearr, predarr, 1)
         lobfvals=np.linspace(min(truearr), max(truearr),num=len(truearr))
         ax.plot(lobfvals, grad*lobfvals+intercept,'-',color='r')
-        print(f"line of best fit is prediction={grad}trueval+{intercept}")
+        print(f"line of best fit is prediction={grad}*trueval+{intercept}")
         return fig,ax
 
     def percentDiffPlot(self, label: str=None)->plt.figure():
         truearr=self._truearr
         predarr=self._predarr
-        print(truearr, predarr)
-        ndim=len((truearr[0]))
-        fig, axes = plt.subplots(nrows=ndim+ndim%2, ncols=2)
-        for i in range(ndim):
-            perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
-            axes[i].hist(perdiff, bins=20)
-            axes[i].set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
+        fig = plt.figure()
+        axes=fig.add_subplot(1,1,1)
+
+        perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
+        axes.hist(perdiff, bins=20)
+        axes.set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
         return fig,axes
 
     def __call__(self, outfile: str = "diagnostics.pdf", label: str=''):
@@ -415,20 +415,27 @@ class model_analyser:
 
 
 if __name__== "__main__":
-    # #Run a load of MCMC
-    mc_runner=multi_mcmc(nchains=2000, spacedim=30, nsteps=10000, debug=False)
-    mc_runner('train_set.csv')
-   # mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    import time
 
+    DIMENSION=45
+    NSTEPS=10000
+
+    mc_runner=multi_mcmc(nchains=10000, spacedim=DIMENSION, nsteps=NSTEPS, debug=False)
+    mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    start=time.time()
+    mc_runner('train_set.csv')
+    end=time.time()
+    print(f"Chain generation took {end-start}s to run")
     mc_runner.saveModel()
-    #Classifier
-    cfier=classifier('train_set.csv', ['Acceptance_Rate'])
-    cfier('model_2Kchains_dim39_10KStep')
    
-    mc_test_runner=multi_mcmc(nchains=100, spacedim=60, nsteps=10000)
+    mc_test_runner=multi_mcmc(nchains=100, spacedim=DIMENSION, nsteps=NSTEPS)
     mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
     mc_test_runner('test_set.csv')
 
-    # #Let's grab our diagnostics
-    # mod_ana=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
-    # mod_ana('diagnostics.pdf', label='Acceptance Rate')
+    #Classifier
+    cfier=classifier('train_set.csv', ['Acceptance_Rate'])
+    cfier('model_2Kchains_dim39_10KStep')
+
+    #Let's grab our diagnostics
+    mod_ana=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
+    mod_ana('diagnostics.pdf', label='Acceptance Rate')
