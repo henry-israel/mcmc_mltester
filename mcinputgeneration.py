@@ -1,3 +1,4 @@
+from math import hypot
 import numpy as np
 import scipy.stats
 import pandas as pd
@@ -20,7 +21,6 @@ class mcmc():
             self._mu=data[0]
             self._cov=data[1]
         
-       
         else:
             self._mu=np.random.randn(spacedim)
             #Make cov matrix
@@ -32,7 +32,7 @@ class mcmc():
             raise ValueError("spatial dimension and mean must be the same length!")
 
         self._acceptedsteps=[]
-        self._numberaccepted=0
+        self._numberaccepted=1
         self._acceptedllhs=[]
         self._stepmatrix=[]
         self._nsteps=0
@@ -146,12 +146,13 @@ class mcmc():
         self._nsteps=nsteps
         
         if stepsize is None:
-            stepsize=np.random.uniform(low=0, high=0.50, size=self._spacedim)
+            stepsize=np.random.uniform(low=0.1, high=0.2, size=self._spacedim)
         self._stepsizes=stepsize
         self._stepmatrix=np.diag(stepsize)
         
         if startpos is None:
-            startpos=np.random.normal(loc=0, scale=1.0, size=self._spacedim)
+            #startpos=np.random.normal(loc=0, scale=1.0, size=self._spacedim)
+            startpos=np.zeros(self._spacedim)
 
         #setup mcmc
         curr_step=startpos
@@ -178,7 +179,7 @@ class mcmc():
             self._total_steps=step
 
             
-        return self._numberaccepted/self._total_steps
+        return self._numberaccepted/self._nsteps
 
 ######################################
 class multi_mcmc():
@@ -198,7 +199,9 @@ class multi_mcmc():
         print(f"Using {self._pool_size} CPUs")
         #self._chunk_size=np.floor(self._nchains/(self._pool_size* 4))
         self._acceptanceratearr=None
-        self._stepsizes=np.random.normal(loc=0, scale=1.0, size=(self._nchains,self._spacedim))
+        #self._stepsizes=np.random.uniform(low=0.3, high=0.6, size=(self._nchains,self._spacedim))
+
+        self._stepsizes=np.random.uniform(low=0,high=1,size=(self._nchains, self._spacedim))/np.random.randint(1,10,size=(self._nchains,self._spacedim))
         self._debug=debug
 
     @property
@@ -217,11 +220,11 @@ class multi_mcmc():
     def runMCMC_MultiProc(self)->list:
         print("MCMC Progress : ")
         if not self._debug:
-            acceptarr=[]
+            acceptarr=np.empty(self._nchains)
             with mp.get_context("spawn").Pool(self._pool_size) as pool:
                 with tqdm.tqdm(total=self._nchains) as pbar:
-                    for a in pool.imap_unordered(self.runMCMC, range(self._nchains)):
-                        acceptarr.append(a)
+                    for i, a in enumerate(pool.imap_unordered(self.runMCMC, range(self._nchains))):
+                        acceptarr[i]=a
                         pbar.update(1)
             pool.join()
             pool.close()
@@ -242,7 +245,7 @@ class multi_mcmc():
         for j in range(self._spacedim):
             step_arr=[step[j] for step in self._stepsizes]
             data[f'Step_{j}']=step_arr
-
+        
         dftosave=pd.DataFrame(data)
         dftosave.to_csv(output, index=False)
         print(f"Saved to {output}")
@@ -277,6 +280,11 @@ class classifier():
         optimise_par_names: list of names of parameter(s) you want to optimise, should be list of strings
         hyperparams: all the hyper params you could want!
         '''
+        self._hyperparams={'epochs' : 150,
+                     'steps_per_epoch' : 100,
+                     'learning_rate' : 0.3}
+
+
         if not isinstance(optimise_par_names, list):
             raise TypeError(f"{optimise_par_names} is not a list, please provide as list")
 
@@ -285,8 +293,8 @@ class classifier():
         
         if not(isinstance(hyperparams, dict) or hyperparams is None):
             raise TypeError(f"{hyperparams} is not a dict, gimme a dict")
-
-        self._hyperparams=hyperparams
+        if hyperparams is not None:
+            self._hyperparams.update(hyperparams)
 
         fulldata=pd.read_csv(data_file)
         try:
@@ -325,21 +333,25 @@ class classifier():
     def model(self):
         return self._model
 
+    def setupRandomForest(self)->None:
+        pass
+
     def setupNeuralNet(self)->None:
         #This is where the classifier lives, obviously this can be tuned. Need to make more customisable!
-        self._model.add(Dense(30, input_dim=(self._nentries, self._ndim), activation='relu'))
-        self._model.add(Dropout(0.2))
-        self._model.add(Dense(20, activation='relu'))
-        self._model.add(Dense(10, activation='relu'))
+        self._model.add(Dense(np.floor(self._ndim/2)+2, input_dim=(self._nentries, self._ndim), activation='relu'))
+#        self._model.add(Dropout(0.2))
+        self._model.add(Dense(np.floor(self._ndim/4)+1, activation='relu'))
         self._model.add(Dense(1, activation='sigmoid'))
-
         #Compile the boi
-        self._model.compile(loss='mse',  optimizer='Adam')
+        self._model.compile(loss='mse', 
+                            #optimizer='Adam')
+                            optimizer=tf.optimizers.Adam(learning_rate=self._hyperparams['learning_rate']))
 
 
     def __call__(self, output: str="modeloutput")->None:
  
-        self._model.fit(self._data_tensor, self._labeldf, epochs=150, batch_size=100, use_multiprocessing=True, steps_per_epoch=100)
+        self._model.fit(self._data_tensor, self._labeldf, epochs=self._hyperparams['epochs'], 
+                            use_multiprocessing=True, steps_per_epoch=self._hyperparams['steps_per_epoch'])
         print(self._model.evaluate(self._data_tensor, self._labeldf))
         print(f"saving to {output}")
         self._model.save(output)
@@ -377,7 +389,8 @@ class model_analyser:
         ax=fig.add_subplot(1,1,1)
         truearr=self._truearr
         predarr=self._predarr
-        print(len(truearr)-len(predarr))
+        if len(truearr)-len(predarr):
+            raise ValueError("True and Prediction arrays are of different length!")
         ax.plot(truearr, predarr,'.')
         ax.set_xlabel(f"True Values {' : '+label if label is not None else ''}")
         ax.set_ylabel(f"Predicted Values {' : '+label if label is not None else ''}")
@@ -393,12 +406,52 @@ class model_analyser:
         truearr=self._truearr
         predarr=self._predarr
         fig = plt.figure()
-        axes=fig.add_subplot(1,1,1)
+        ax=fig.add_subplot(1,1,1)
 
         perdiff=200*np.abs(truearr-predarr)/(truearr+predarr)
-        axes.hist(perdiff, bins=20)
-        axes.set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
-        return fig,axes
+        ax.hist(perdiff, bins=20, density=True)
+        ax.set_xlabel(f"Binned percentage difference between true/predicted vals {label if label is not None else ''}")
+        ax.set_ylabel("Density")
+        return fig,ax
+
+    def acceptValDistro(self, label: str=None)->plt.figure():
+        truearr=self._truearr
+        fig=plt.figure()
+        ax=fig.add_subplot(1,1,1)
+        ax.hist(truearr, bins=20, density=True)
+        ax.set_xlabel(f"Binned distribution of true values for {label if label is not None else ''}")
+        ax.set_ylabel("Density")
+        return fig,ax
+
+    def predValDistro(self, label: str=None)->plt.figure():
+        predarr=self._predarr
+        fig=plt.figure()
+        ax=fig.add_subplot(1,1,1)
+        ax.hist(predarr, bins=20, density=True)
+        ax.set_xlabel(f"Binned distribution of predicted values for {label if label is not None else ''}")
+        ax.set_ylabel("Density")
+        return fig,ax
+
+    def overlayHists(self, label: str=None)->plt.figure():
+        #overlays histograms
+        predarr=self._predarr
+        truearr=self._truearr
+
+        max_val=max(max(truearr),max(predarr))
+        min_val=min(min(truearr),min(predarr))
+        bins=np.linspace(min_val,max_val,20)
+
+        fig=plt.figure()
+        ax=fig.add_subplot(1,1,1)
+        ax.set_xlabel(f"Binned distribution of true and predicted values for {label if label is not None else ''}")
+        ax.set_ylabel("Density")
+        ax.hist(predarr, bins=bins, alpha=0.4, density=True, label='Predicted Values', edgecolor='black', linewidth=1.2, color='r')
+        ax.hist(truearr, bins=bins, alpha=0.4, density=True, label='True Values', edgecolor='black', linewidth=1.2, color='b')
+        ax.legend(loc='upper right')
+
+        return fig, ax
+
+
 
     def __call__(self, outfile: str = "diagnostics.pdf", label: str=''):
         #Call here will run through all the diagnostic plots
@@ -410,32 +463,43 @@ class model_analyser:
         perdiff_fig, _=self.percentDiffPlot(label=label)
         pdf.savefig(perdiff_fig)
 
+        overlayhists_fig, _=self.overlayHists(label=label)
+        pdf.savefig(overlayhists_fig)
+
         pdf.close()
-        print(f"Save figures to {outfile}")
+        print(f"Saved figures to {outfile}")
 
 
-if __name__== "__main__":
+if __name__== "__main__":    
     import time
 
-    DIMENSION=45
-    NSTEPS=10000
+    # DIMENSION=30
+    # NSTEPS=10000
 
-    mc_runner=multi_mcmc(nchains=10000, spacedim=DIMENSION, nsteps=NSTEPS, debug=False)
-    mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
-    start=time.time()
-    mc_runner('train_set.csv')
-    end=time.time()
-    print(f"Chain generation took {end-start}s to run")
-    mc_runner.saveModel()
+    # mc_runner=multi_mcmc(nchains=2000, spacedim=DIMENSION, nsteps=NSTEPS, debug=False)
+    # # mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    # start=time.time()
+    # mc_runner('train_set.csv')
+    # end=time.time()
+    # print(f"Chain generation took {end-start}s to run")
+    # mc_runner.saveModel()
    
-    mc_test_runner=multi_mcmc(nchains=100, spacedim=DIMENSION, nsteps=NSTEPS)
-    mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
-    mc_test_runner('test_set.csv')
+    # mc_test_runner=multi_mcmc(nchains=1000, spacedim=DIMENSION, nsteps=NSTEPS)
+    # mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    # mc_test_runner('test_set.csv')
 
     #Classifier
-    cfier=classifier('train_set.csv', ['Acceptance_Rate'])
+    hyperparams={'epochs' : 200,
+                'steps_per_epoch' : 40,
+                'learning_rate' : 0.1}
+
+    cfier=classifier('train_set.csv', ['Acceptance_Rate'], hyperparams=hyperparams)
     cfier('model_2Kchains_dim39_10KStep')
 
     #Let's grab our diagnostics
-    mod_ana=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
-    mod_ana('diagnostics.pdf', label='Acceptance Rate')
+    mod_analyse_train=model_analyser ('model_2Kchains_dim39_10KStep', 'train_set.csv')
+    mod_analyse_train('diagnostics_train.pdf', label='Acceptance Rate')
+
+    mod_analyse_test=model_analyser ('model_2Kchains_dim39_10KStep', 'test_set.csv')
+    mod_analyse_test('diagnostics_test.pdf', label='Acceptance Rate')
+    print("DONE")
