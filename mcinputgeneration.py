@@ -26,7 +26,6 @@ class mcmc():
             #Make cov matrix
             sqrt_cov=np.random.randn(spacedim,spacedim)
             self._cov=np.dot(sqrt_cov,sqrt_cov.T)
-            print("HELLO")
 
         if self._spacedim!=len(self._mu):
             raise ValueError("spatial dimension and mean must be the same length!")
@@ -112,8 +111,8 @@ class mcmc():
     def autocorrs(self,totlag: int=1000)->list:
         print("Making Autocorrelations")
         if "daemon" not in mp.current_process()._config:
-            a_pool=mp.Pool()
-            autocorrarr=a_pool.map(self.autocalc, range(totlag))
+            pool=mp.Pool()
+            autocorrarr=list(pool.imap(self.autocalc, range(totlag)))
         else:
             autocorrarr=np.empty((totlag, self._spacedim))
             for k in range(totlag):
@@ -141,7 +140,7 @@ class mcmc():
         return num_k/denom_k
     
 
-    def __call__(self, startpos: list=None, stepsize: int=None, nsteps: int=10000)->None:
+    def __call__(self, startpos: list=None, stepsize: int=None, nsteps: int=10000, burnin: int=0)->None:
         
         self._nsteps=nsteps
         
@@ -172,18 +171,19 @@ class mcmc():
             if self.acceptFunc(curr_llh, prop_llh):
                 curr_step=prop_step
                 curr_llh=prop_llh
-                self._numberaccepted+=1
+                if step>burnin:
+                    self._numberaccepted+=1
 
             self._acceptedsteps[step]=curr_step
             self._acceptedllhs[step]=curr_llh
             self._total_steps=step
 
             
-        return self._numberaccepted/self._nsteps
+        return self._numberaccepted/(self._nsteps-burnin)
 
 ######################################
 class multi_mcmc():
-    def __init__(self, nchains: int=100, spacedim: int=10, nsteps: int=10000, data=None, debug=False)->None:
+    def __init__(self, nchains: int=100, spacedim: int=10, nsteps: int=10000, data=None, burnin: int=0, debug=False)->None:
         self._nchains=nchains
         self._spacedim=spacedim
         self._nsteps=nsteps
@@ -201,8 +201,9 @@ class multi_mcmc():
         self._acceptanceratearr=None
         #self._stepsizes=np.random.uniform(low=0.3, high=0.6, size=(self._nchains,self._spacedim))
 
-        self._stepsizes=np.random.uniform(low=0,high=1,size=(self._nchains, self._spacedim))/np.random.randint(1,10,size=(self._nchains,self._spacedim))
+        self._stepsizes=np.random.uniform(low=0,high=1,size=(self._nchains, self._spacedim))
         self._debug=debug
+        self._burnin=burnin
 
     @property
     def acceptance_rate(self)->float:
@@ -214,20 +215,24 @@ class multi_mcmc():
 
     def runMCMC(self, i:int)->int:
             mcmc_=mcmc(self._spacedim,data=self._data, debug=self._debug)
-            acceptancerate=mcmc_(stepsize=self._stepsizes[i],nsteps=self._nsteps)
-            return acceptancerate
+            acceptancerate=mcmc_(stepsize=self._stepsizes[i],nsteps=self._nsteps, burnin=self._burnin)
+            return acceptancerate, self._stepsizes[i]
 
     def runMCMC_MultiProc(self)->list:
+        stepsize_clone=np.empty(shape=self._stepsizes.shape)
         print("MCMC Progress : ")
         if not self._debug:
             acceptarr=np.empty(self._nchains)
             with mp.get_context("spawn").Pool(self._pool_size) as pool:
                 with tqdm.tqdm(total=self._nchains) as pbar:
-                    for i, a in enumerate(pool.imap_unordered(self.runMCMC, range(self._nchains))):
-                        acceptarr[i]=a
+                    #acc_step is a tuple of acceptance rate, step sizes
+                    for i, acc_step in enumerate(pool.imap_unordered(self.runMCMC, range(self._nchains))):
+                        acceptarr[i]=acc_step[0]
+                        stepsize_clone[i]=acc_step[1]
                         pbar.update(1)
             pool.join()
             pool.close()
+            self._stepsizes=stepsize_clone
         #Non-Parallelized, for debugging (SLOW)
         else:
             acceptarr=[]
@@ -296,15 +301,16 @@ class classifier():
         if hyperparams is not None:
             self._hyperparams.update(hyperparams)
 
-        fulldata=pd.read_csv(data_file)
+        self._fulldata=pd.read_csv(data_file)
+
         try:
-            self._labeldf=fulldata[optimise_par_names]
+            self._labeldf=self._fulldata[optimise_par_names]
         except ValueError:
             print(f"{optimise_par_names} is not in {data_file}")
         except:
             raise Exception(f"Sorry, something's gone wrong with your labels")
 
-        data_df=fulldata.drop(optimise_par_names, axis=1)
+        data_df=self._fulldata.drop(optimise_par_names, axis=1)
         self._nentries=len(data_df)
         self._ndim=len(data_df.columns)
         if self._ndim==0:
@@ -338,15 +344,34 @@ class classifier():
 
     def setupNeuralNet(self)->None:
         #This is where the classifier lives, obviously this can be tuned. Need to make more customisable!
-        self._model.add(Dense(np.floor(self._ndim/2)+2, input_dim=(self._nentries, self._ndim), activation='relu'))
-#        self._model.add(Dropout(0.2))
-        self._model.add(Dense(np.floor(self._ndim/4)+1, activation='relu'))
+        print(f"dim : {self._ndim}")
+        print(f"entries : {self._nentries}")
+        self._model.add(Dense(15, activation='relu'))
+        self._model.add(Dense(10, activation='relu'))
+        self._model.add(Dense(2, activation='relu'))
+
         self._model.add(Dense(1, activation='sigmoid'))
         #Compile the boi
         self._model.compile(loss='mse', 
                             #optimizer='Adam')
                             optimizer=tf.optimizers.Adam(learning_rate=self._hyperparams['learning_rate']))
 
+
+    def plotMyData(self, plotname: str='train_plot.pdf'):
+        #Method to plot data with
+        fig=plt.figure()
+        ax=fig.add_subplot(1,1,1)
+        accrate=self._fulldata['Acceptance_Rate'].to_numpy()
+        step1=self._fulldata['Step_0'].to_numpy()
+        step2=self._fulldata['Step_1'].to_numpy()
+
+        clev = np.arange(accrate.min(),accrate.max(),.001)
+        contplot=ax.tricontourf(step1, step2, accrate,clev,cmap='terrain')
+        ax.set_xlabel("Step Size 1")
+        ax.set_ylabel("Step Size 2")
+        cbar=fig.colorbar(contplot)
+        cbar.ax.set_ylabel("Acceptance Rate")
+        fig.savefig(f"{plotname}")
 
     def __call__(self, output: str="modeloutput")->None:
  
@@ -450,8 +475,7 @@ class model_analyser:
         ax.legend(loc='upper right')
 
         return fig, ax
-
-
+                
 
     def __call__(self, outfile: str = "diagnostics.pdf", label: str=''):
         #Call here will run through all the diagnostic plots
@@ -473,28 +497,51 @@ class model_analyser:
 if __name__== "__main__":    
     import time
 
-    # DIMENSION=30
-    # NSTEPS=10000
+    ######################### MCMC TEST ###################
+    # mctest=mcmc(spacedim=100,  data=None,debug=False)
+    # ac=mctest(nsteps=30000)
+    # print(ac)
+    # steps=np.array(mctest.accepted_steps)
 
-    # mc_runner=multi_mcmc(nchains=2000, spacedim=DIMENSION, nsteps=NSTEPS, debug=False)
-    # # mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
-    # start=time.time()
-    # mc_runner('train_set.csv')
-    # end=time.time()
-    # print(f"Chain generation took {end-start}s to run")
-    # mc_runner.saveModel()
+    # step_num=np.arange(len(steps))
+    # stepfig=plt.figure()
+    # stepax=stepfig.add_subplot(1,1,1)
+    # stepax.plot(step_num,steps)
+    # stepfig.savefig('acceptedsteps.pdf')
+
+    # ac=mctest.autocorrs(totlag=1000)
+    # lag=np.arange(len(ac))-1
+    # fig=plt.figure()
+    # ax=fig.add_subplot(1,1,1)
+    # ax.plot(lag,ac)
+    # fig.savefig('autocorrelations.pdf')
+
+    
+    # ######################## FULL MCMC RUNNER #############
+    DIMENSION=30
+    NSTEPS=5000
+    BURNIN=200
+
+    mc_runner=multi_mcmc(nchains=2000, spacedim=DIMENSION, nsteps=NSTEPS, burnin=BURNIN, debug=False)
+    # mc_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    start=time.time()
+    mc_runner('train_set.csv')
+    end=time.time()
+    print(f"Chain generation took {end-start}s to run")
+    mc_runner.saveModel()
    
-    # mc_test_runner=multi_mcmc(nchains=1000, spacedim=DIMENSION, nsteps=NSTEPS)
-    # mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
-    # mc_test_runner('test_set.csv')
+    mc_test_runner=multi_mcmc(nchains=1000, spacedim=DIMENSION, nsteps=NSTEPS, burnin=BURNIN)
+    mc_test_runner.usePreviousModel('model_data_mean.csv', 'model_data_cov.csv')
+    mc_test_runner('test_set.csv')
 
-    #Classifier
+#    Classifier
     hyperparams={'epochs' : 200,
-                'steps_per_epoch' : 40,
-                'learning_rate' : 0.1}
+                'steps_per_epoch' : 50,
+                'learning_rate' : 0.001}
 
     cfier=classifier('train_set.csv', ['Acceptance_Rate'], hyperparams=hyperparams)
     cfier('model_2Kchains_dim39_10KStep')
+    cfier.plotMyData()
 
     #Let's grab our diagnostics
     mod_analyse_train=model_analyser ('model_2Kchains_dim39_10KStep', 'train_set.csv')
